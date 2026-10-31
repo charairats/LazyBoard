@@ -8,6 +8,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/LazyBoard "$APP/Contents/MacOS/LazyBoard"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 # Ad-hoc signature with an identifier-based designated requirement, so the Accessibility
 # grant survives rebuilds (the default cdhash requirement changes on every build).
 codesign --force --sign - --identifier com.jeancharairat.lazyboard \

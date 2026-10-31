@@ -23,6 +23,7 @@
 | `LLMSuggester.swift` | ชั้นที่สอง: หยุดพิมพ์ ~1 วิ แล้วส่งประโยคล่าสุดให้ Claude แก้ typo จริง (ปุ่มข้างเคียง, สระ/วรรณยุกต์ผิด, สะกดอังกฤษผิด) |
 | `KeychainStore.swift` | เก็บ Claude API key ใน Keychain |
 | `SelfTest.swift` | `LazyBoard --test` เคสจริงของจีน + เคสที่ต้องเงียบ |
+| `Resources/icon/make-icon.swift` | สคริปต์วาดไอคอน (สลอธเกาะคีย์บอร์ด) → `Resources/AppIcon.icns` |
 
 ## วิธีใช้
 
