@@ -1,13 +1,13 @@
 import Foundation
 
-/// Tiny append-only diagnostic log at ~/Library/Logs/ThaiTab.log (never contains typed text).
+/// Tiny append-only diagnostic log at ~/Library/Logs/LazyBoard.log (never contains typed text).
 enum Log {
     static let url: URL = {
         let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("ThaiTab.log")
+        return dir.appendingPathComponent("LazyBoard.log")
     }()
-    private static let queue = DispatchQueue(label: "thaitab.log")
+    private static let queue = DispatchQueue(label: "lazyboard.log")
     private static let formatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")

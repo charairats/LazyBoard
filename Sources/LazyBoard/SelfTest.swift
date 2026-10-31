@@ -1,6 +1,6 @@
 import Foundation
 
-/// `ThaiTab --test` : runs detector cases from the terminal, no Accessibility permission needed.
+/// `LazyBoard --test` : runs detector cases from the terminal, no Accessibility permission needed.
 enum SelfTest {
     static func run() -> Int32 {
         let d = Detector.shared

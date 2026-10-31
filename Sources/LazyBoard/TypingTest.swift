@@ -64,7 +64,7 @@ final class TypingTest: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     private func build() {
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 420),
                          styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
-        w.title = "แบบทดสอบการพิมพ์ · ThaiTab"
+        w.title = "แบบทดสอบการพิมพ์ · LazyBoard"
         w.delegate = self
         w.isReleasedWhenClosed = false
 
@@ -200,7 +200,7 @@ final class TypingTest: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     /// Full per-sentence results (target vs typed) go to a separate file so they can be reviewed later.
     static let resultsURL: URL = {
         let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/ThaiTab", isDirectory: true)
+            .appendingPathComponent("Library/Application Support/LazyBoard", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("typing-test-results.txt")
     }()

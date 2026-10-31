@@ -466,7 +466,7 @@ final class LLMSuggester {
             segment,
         ]
         // Run from an empty folder so no project CLAUDE.md or MCP servers are loaded.
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("thaitab-cli", isDirectory: true)
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("lazyboard-cli", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         proc.currentDirectoryURL = dir
         var env = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("CLAUDE") && !$0.key.hasPrefix("ANTHROPIC") }

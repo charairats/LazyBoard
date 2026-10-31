@@ -65,7 +65,7 @@ final class Detector {
         "nosql", "redis", "postgres", "mysql", "mongodb", "firebase", "supabase", "vercel", "netlify", "aws", "gcp",
         "azure", "cloudflare", "nginx", "linux", "ubuntu", "homebrew", "brew", "cli", "sdk", "ide", "vscode", "cursor",
         "copilot", "chatgpt", "openai", "claude", "anthropic", "llm", "ai", "ml", "ok", "okay", "lol", "btw", "fyi",
-        "asap", "tbh", "imo", "idk", "wfh", "eta", "nirvania", "thaitab",
+        "asap", "tbh", "imo", "idk", "wfh", "eta", "nirvania", "lazyboard",
     ]
 
     // MARK: Public

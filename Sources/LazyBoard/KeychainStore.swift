@@ -3,7 +3,7 @@ import Security
 
 /// Stores the Claude API key in the user's login keychain.
 enum KeychainStore {
-    private static let service = "com.jeen.thaitab"
+    private static let service = "com.jeancharairat.lazyboard"
     private static let account = "anthropic-api-key"
 
     private static var query: [String: Any] {
@@ -13,7 +13,15 @@ enum KeychainStore {
     }
 
     static func read() -> String? {
+        if let key = read(service: service) { return key }
+        // Key saved while the app was still called ThaiTab.
+        if let key = read(service: "com.jeen.thaitab") { write(key); return key }
+        return nil
+    }
+
+    private static func read(service: String) -> String? {
         var q = query
+        q[kSecAttrService as String] = service
         q[kSecReturnData as String] = true
         q[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?

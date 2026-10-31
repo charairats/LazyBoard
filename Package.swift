@@ -2,12 +2,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "ThaiTab",
+    name: "LazyBoard",
     platforms: [.macOS(.v13)],
     targets: [
         .executableTarget(
-            name: "ThaiTab",
-            path: "Sources/ThaiTab"
+            name: "LazyBoard",
+            path: "Sources/LazyBoard"
         )
     ]
 )

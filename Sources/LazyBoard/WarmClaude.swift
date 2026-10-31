@@ -40,7 +40,7 @@ final class WarmClaude {
             "--system-prompt", LLMSuggester.systemPrompt,
             "--json-schema", LLMSuggester.jsonSchema,
         ]
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("thaitab-cli", isDirectory: true)
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("lazyboard-cli", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         p.currentDirectoryURL = dir
         var env = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("CLAUDE") && !$0.key.hasPrefix("ANTHROPIC") }

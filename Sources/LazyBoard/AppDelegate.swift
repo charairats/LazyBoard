@@ -25,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var fixCount = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        migrateOldSettings()
         defaults.register(defaults: ["enabled": true, "switchLayout": true, "excluded": [String](),
                                      "autoFix": true, "holdOnEnter": true, "checkWhileTyping": false, "emojiMode": false,
                                      "llmEnabled": true, "llmModel": LLMSuggester.Model.haiku.rawValue,
@@ -50,12 +51,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ensureAccessibility()
     }
 
-    /// thaitab://test opens the typing test; thaitab://menu is a no-op that just activates the app.
+    /// lazyboard://test opens the typing test; lazyboard://menu is a no-op that just activates the app.
     func application(_ application: NSApplication, open urls: [URL]) {
-        for url in urls where url.scheme == "thaitab" {
+        for url in urls where url.scheme == "lazyboard" {
             Log.write("url: \(url.absoluteString)")
             if url.host == "test" { TypingTest.shared.show() }
         }
+    }
+
+    /// The app used to be ThaiTab (com.jeen.thaitab): carry its settings over on first launch.
+    private func migrateOldSettings() {
+        guard !defaults.bool(forKey: "migratedFromThaiTab"), let old = UserDefaults(suiteName: "com.jeen.thaitab") else { return }
+        for key in ["enabled", "switchLayout", "excluded", "autoFix", "holdOnEnter", "checkWhileTyping", "emojiMode", "llmEnabled", "llmModel", "llmBackend"] {
+            if let value = old.object(forKey: key), defaults.object(forKey: key) == nil { defaults.set(value, forKey: key) }
+        }
+        defaults.set(true, forKey: "migratedFromThaiTab")
+        Log.write("settings migrated from ThaiTab")
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -129,14 +140,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         advancedItem.submenu = advanced
         menu.addItem(advancedItem)
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "ออกจาก ThaiTab", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        menu.addItem(NSMenuItem(title: "ออกจาก LazyBoard", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
         refreshMenuState()
     }
 
     /// Keyboard with a small lightning bolt at the top-right corner, as a template image.
     private static func boltKeyboardIcon() -> NSImage? {
-        guard let keyboard = NSImage(systemSymbolName: "keyboard", accessibilityDescription: "ThaiTab")?
+        guard let keyboard = NSImage(systemSymbolName: "keyboard", accessibilityDescription: "LazyBoard")?
                 .withSymbolConfiguration(.init(pointSize: 15, weight: .regular)),
               let bolt = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: nil)?
                 .withSymbolConfiguration(.init(pointSize: 9, weight: .bold)) else { return nil }
