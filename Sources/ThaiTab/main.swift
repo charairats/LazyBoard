@@ -32,6 +32,7 @@ if let i = CommandLine.arguments.firstIndex(of: "--llm"), i + 1 < CommandLine.ar
     llm.apiKey = ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"] ?? KeychainStore.read()
     if let m = ProcessInfo.processInfo.environment["THAITAB_MODEL"], let model = LLMSuggester.Model(rawValue: m) { llm.model = model }
     llm.backend = ProcessInfo.processInfo.environment["THAITAB_BACKEND"] == "api" ? .api : .claudeCLI
+    llm.emojiMode = ProcessInfo.processInfo.environment["THAITAB_EMOJI"] == "1"
     guard llm.isReady else {
         print(llm.backend == .api ? "no API key: set ANTHROPIC_API_KEY or save one from the ThaiTab menu"
                                   : "claude CLI not found (install Claude Code)")

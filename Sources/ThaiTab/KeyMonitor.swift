@@ -64,7 +64,24 @@ final class KeyMonitor {
 
     init() {
         llm.onResult = { [weak self] original, reply in
-            self?.showLLMResult(original: original, reply: reply)
+            guard let self = self else { return }
+            // Emoji mode: nothing to fix but the emojis — add them and carry on without asking.
+            if self.llm.emojiMode, let h = self.hold, h.segment == original,
+               LLMSuggester.onlyAddsEmoji(original: original, fixed: reply.fixed) {
+                let all = Array(self.buffer.unicodeScalars)
+                var spaces = 0
+                while spaces < all.count, all[all.count - 1 - spaces] == " " { spaces += 1 }
+                let trailing = String(repeating: " ", count: spaces)
+                let s = Suggestion(scalarCount: original.unicodeScalars.count + trailing.unicodeScalars.count,
+                                   replacement: reply.fixed, direction: nil, source: .llm)
+                if self.buffer.hasSuffix(original + trailing) {
+                    Log.write("emoji added, sending")
+                    self.apply(s, automatic: true)
+                    self.releaseHold(send: true, showCheck: true)
+                    return
+                }
+            }
+            self.showLLMResult(original: original, reply: reply)
         }
         llm.onStarted = { [weak self] _ in
             guard let self = self, self.suggestion == nil, self.cycle == nil else { return }

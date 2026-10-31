@@ -33,6 +33,8 @@ final class LLMSuggester {
     }
 
     var isEnabled = true
+    /// Append one or two fitting emojis to the end of each checked line.
+    var emojiMode = false { didSet { if emojiMode != oldValue { cache.removeAll() } } }
     var backend: Backend = .claudeCLI
     var model: Model = .haiku
     var apiKey: String?
@@ -90,6 +92,10 @@ final class LLMSuggester {
     - If there is nothing to fix, return the text unchanged with an empty "alternatives".
     - Each user message is a separate, independent text to fix. Never use earlier messages as context \
     and never refer to them.
+    - If the JSON has "emoji": true, append one or two emojis that fit the tone of the message to the very \
+    end of "fixed" and of each alternative, after a space (e.g. "…ด้วยนะคะ 🙏", "…เสร็จแล้ว 🎉✨"). Never put \
+    emojis anywhere else, never add any when "emoji" is false or missing, and do not add more if the text \
+    already ends with an emoji.
 
     The user message is a JSON object. "text" is the text to fix. "layout_hints" maps garbled words in the \
     text to what the same keys produce on the other keyboard layout (Thai Kedmanee <-> US QWERTY): the \
@@ -173,6 +179,27 @@ final class LLMSuggester {
     /// Remember a segment as checked (used after a failed check so Enter is not held again for it).
     func markChecked(_ segment: String) { cache[segment] = Reply(fixed: segment, alternatives: []) }
 
+    /// The text without a trailing run of emojis (and the spaces before them).
+    static func strippingTrailingEmoji(_ text: String) -> String {
+        var scalars = Array(text.unicodeScalars)
+        func isEmojiPart(_ u: Unicode.Scalar) -> Bool {
+            if u.value == 0x200D || u.value == 0xFE0F || (0x1F3FB...0x1F3FF).contains(u.value) { return true } // ZWJ, VS16, skin tones
+            if (0x1F1E6...0x1F1FF).contains(u.value) { return true } // flags
+            return u.value >= 0x2190 && (u.properties.isEmoji || u.properties.isEmojiPresentation)
+        }
+        while let last = scalars.last, isEmojiPart(last) || last == " " {
+            scalars.removeLast()
+        }
+        return String(String.UnicodeScalarView(scalars))
+    }
+
+    /// True when `fixed` is `original` plus emojis at the end and nothing else.
+    static func onlyAddsEmoji(original: String, fixed: String) -> Bool {
+        guard fixed != original else { return false }
+        let o = original.trimmingCharacters(in: .whitespaces)
+        return strippingTrailingEmoji(fixed) == o && strippingTrailingEmoji(fixed) != fixed.trimmingCharacters(in: .whitespaces)
+    }
+
     // MARK: Layout hints for the model
 
     /// Words that are not real in their own script, with what the same keys give on the other layout.
@@ -225,8 +252,9 @@ final class LLMSuggester {
     }
 
     /// The JSON the model receives.
-    static func userMessage(for segment: String) -> String {
+    static func userMessage(for segment: String, emoji: Bool = false) -> String {
         var obj: [String: Any] = ["text": segment]
+        if emoji { obj["emoji"] = true }
         let hints = layoutHints(for: segment)
         if !hints.isEmpty { obj["layout_hints"] = hints }
         guard let data = try? JSONSerialization.data(withJSONObject: obj), let str = String(data: data, encoding: .utf8) else {
@@ -254,7 +282,7 @@ final class LLMSuggester {
         Log.write("llm warm start (\(segment.unicodeScalars.count) keys, \(model.rawValue))")
         inFlightSegment = segment
         onStarted?(segment)
-        warm.send(Self.userMessage(for: segment), model: model) { [weak self] reply, error in
+        warm.send(Self.userMessage(for: segment, emoji: emojiMode), model: model) { [weak self] reply, error in
             guard let self = self else { return }
             self.inFlightSegment = nil
             defer { self.drainQueue() }
@@ -357,7 +385,7 @@ final class LLMSuggester {
                     ],
                 ],
             ],
-            "messages": [["role": "user", "content": Self.userMessage(for: segment)]],
+            "messages": [["role": "user", "content": Self.userMessage(for: segment, emoji: emojiMode)]],
         ]
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
         requestCount += 1

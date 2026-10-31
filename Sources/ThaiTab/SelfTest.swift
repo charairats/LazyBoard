@@ -123,6 +123,13 @@ enum SelfTest {
         check("changed words emphasised", single.filter(\.emphasised).map(\.text).joined() == "กำลังทดสอบคีย์บอร์ด ต้องให้",
               single.map { ($0.emphasised ? "[" : "") + $0.text + ($0.emphasised ? "]" : "") }.joined())
 
+        print("\n== emoji mode helpers ==")
+        check("strip trailing emoji", LLMSuggester.strippingTrailingEmoji("เสร็จแล้วค่ะ 🎉✨") == "เสร็จแล้วค่ะ")
+        check("strip skin-tone emoji", LLMSuggester.strippingTrailingEmoji("ขอบคุณนะคะ 🙏🏻") == "ขอบคุณนะคะ")
+        check("only adds emoji", LLMSuggester.onlyAddsEmoji(original: "ส่ง PR แล้วนะ", fixed: "ส่ง PR แล้วนะ 🚀"))
+        check("not only emoji when a word changed", !LLMSuggester.onlyAddsEmoji(original: "ส่ง PR แล้วนะ", fixed: "ส่ง PR แล้วนะคะ 🚀"))
+        check("not only emoji when nothing added", !LLMSuggester.onlyAddsEmoji(original: "ส่ง PR แล้วนะ", fixed: "ส่ง PR แล้วนะ"))
+
         print("\n== typing test scoring ==")
         check("identical = 100%", TypingTest.accuracy(typed: "สวัสดีค่ะ", target: "สวัสดีค่ะ") == 1)
         check("empty typed = 0%", TypingTest.accuracy(typed: "", target: "abc") == 0)

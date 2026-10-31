@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let switchItem = NSMenuItem(title: "สลับคีย์บอร์ดให้หลังแก้", action: #selector(toggleSwitch), keyEquivalent: "")
     private let autoFixItem = NSMenuItem(title: "แก้พิมพ์ค้างคีย์บอร์ดให้เองตอนเคาะ space/Enter (Esc ย้อนกลับ)", action: #selector(toggleAutoFix), keyEquivalent: "")
     private let holdItem = NSMenuItem(title: "อม Enter ไว้ให้ Claude ตรวจก่อนส่ง (Ctrl+Enter = ส่งเลย)", action: #selector(toggleHold), keyEquivalent: "")
+    private let emojiItem = NSMenuItem(title: "โหมดอีโมจิ: เติมท้ายข้อความ 1–2 ตัวตอนส่ง", action: #selector(toggleEmoji), keyEquivalent: "")
     private let quietItem = NSMenuItem(title: "ให้ Claude ตรวจเงียบๆ ระหว่างหยุดพิมพ์ด้วย", action: #selector(toggleQuiet), keyEquivalent: "")
     private let testItem = NSMenuItem(title: "แบบทดสอบการพิมพ์…", action: #selector(openTypingTest), keyEquivalent: "")
     private let excludeItem = NSMenuItem(title: "ไม่ใช้ในแอปนี้", action: #selector(toggleExclude), keyEquivalent: "")
@@ -25,7 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         defaults.register(defaults: ["enabled": true, "switchLayout": true, "excluded": [String](),
-                                     "autoFix": true, "holdOnEnter": true, "checkWhileTyping": false,
+                                     "autoFix": true, "holdOnEnter": true, "checkWhileTyping": false, "emojiMode": false,
                                      "llmEnabled": true, "llmModel": LLMSuggester.Model.haiku.rawValue,
                                      "llmBackend": LLMSuggester.Backend.claudeCLI.rawValue])
         monitor.llm.backend = LLMSuggester.Backend(rawValue: defaults.string(forKey: "llmBackend") ?? "") ?? .claudeCLI
@@ -34,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         monitor.autoFixLayout = defaults.bool(forKey: "autoFix")
         monitor.holdOnEnter = defaults.bool(forKey: "holdOnEnter")
         monitor.checkWhileTyping = defaults.bool(forKey: "checkWhileTyping")
+        monitor.llm.emojiMode = defaults.bool(forKey: "emojiMode")
         monitor.excludedBundleIDs = Set(defaults.stringArray(forKey: "excluded") ?? [])
         monitor.llm.isEnabled = defaults.bool(forKey: "llmEnabled")
         monitor.llm.model = LLMSuggester.Model(rawValue: defaults.string(forKey: "llmModel") ?? "") ?? .haiku
@@ -64,8 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func buildStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let image = NSImage(systemSymbolName: "keyboard", accessibilityDescription: "ThaiTab") {
-            image.isTemplate = true
+        if let image = Self.boltKeyboardIcon() {
             statusItem.button?.image = image
         } else {
             statusItem.button?.title = "ไท"
@@ -77,17 +78,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         testItem.target = self
         menu.addItem(testItem)
         menu.addItem(.separator())
-        for item in [enabledItem, switchItem, autoFixItem, holdItem, quietItem, excludeItem, loginItem] {
+
+        // Everyday switches only; everything else lives under "ตั้งค่าเพิ่มเติม".
+        enabledItem.title = "เปิดใช้งาน"
+        holdItem.title = "ตรวจด้วย Claude ก่อนส่ง (Ctrl+Enter ข้าม)"
+        emojiItem.title = "เติมอีโมจิท้ายข้อความ"
+        for item in [enabledItem, holdItem, emojiItem, excludeItem] {
             item.target = self
             menu.addItem(item)
         }
         menu.addItem(.separator())
+
+        let advanced = NSMenu()
+        switchItem.title = "สลับคีย์บอร์ดให้หลังแก้"
+        autoFixItem.title = "แก้พิมพ์ค้างคีย์บอร์ดให้เองตอนเคาะ space/Enter"
+        quietItem.title = "ให้ Claude ตรวจเงียบๆ ระหว่างหยุดพิมพ์ด้วย"
+        llmItem.title = "ใช้ Claude แก้คำผิด"
+        for item in [switchItem, autoFixItem, quietItem, llmItem, loginItem] {
+            item.target = self
+            advanced.addItem(item)
+        }
+        advanced.addItem(.separator())
         llmStatusLine.isEnabled = false
-        menu.addItem(llmStatusLine)
-        llmItem.target = self
-        menu.addItem(llmItem)
-        apiKeyItem.target = self
-        menu.addItem(apiKeyItem)
+        advanced.addItem(llmStatusLine)
         let backendItem = NSMenuItem(title: "เรียก Claude ผ่าน", action: nil, keyEquivalent: "")
         for backend in LLMSuggester.Backend.allCases {
             let item = NSMenuItem(title: backend.title, action: #selector(selectBackend(_:)), keyEquivalent: "")
@@ -96,7 +109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             backendMenu.addItem(item)
         }
         backendItem.submenu = backendMenu
-        menu.addItem(backendItem)
+        advanced.addItem(backendItem)
         let modelItem = NSMenuItem(title: "โมเดล", action: nil, keyEquivalent: "")
         for model in LLMSuggester.Model.allCases {
             let item = NSMenuItem(title: model.title, action: #selector(selectModel(_:)), keyEquivalent: "")
@@ -105,15 +118,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             modelMenu.addItem(item)
         }
         modelItem.submenu = modelMenu
-        menu.addItem(modelItem)
-        menu.addItem(.separator())
+        advanced.addItem(modelItem)
+        apiKeyItem.target = self
+        advanced.addItem(apiKeyItem)
+        advanced.addItem(.separator())
         let perm = NSMenuItem(title: "เปิดหน้าตั้งค่า Accessibility…", action: #selector(openAccessibilitySettings), keyEquivalent: "")
         perm.target = self
-        menu.addItem(perm)
+        advanced.addItem(perm)
+        let advancedItem = NSMenuItem(title: "ตั้งค่าเพิ่มเติม", action: nil, keyEquivalent: "")
+        advancedItem.submenu = advanced
+        menu.addItem(advancedItem)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "ออกจาก ThaiTab", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
         refreshMenuState()
+    }
+
+    /// Keyboard with a small lightning bolt at the top-right corner, as a template image.
+    private static func boltKeyboardIcon() -> NSImage? {
+        guard let keyboard = NSImage(systemSymbolName: "keyboard", accessibilityDescription: "ThaiTab")?
+                .withSymbolConfiguration(.init(pointSize: 15, weight: .regular)),
+              let bolt = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: 9, weight: .bold)) else { return nil }
+        let size = NSSize(width: 22, height: 16)
+        let image = NSImage(size: size, flipped: false) { rect in
+            let kb = keyboard.size
+            let kbRect = NSRect(x: 0, y: (rect.height - kb.height) / 2, width: kb.width, height: kb.height)
+            keyboard.draw(in: kbRect)
+            let b = bolt.size
+            let boltRect = NSRect(x: rect.width - b.width + 1, y: rect.height - b.height + 1, width: b.width, height: b.height)
+            // Punch a small gap around the bolt so it reads clearly over the keyboard outline.
+            NSGraphicsContext.current?.cgContext.setBlendMode(.destinationOut)
+            NSColor.black.setFill()
+            NSBezierPath(ovalIn: boltRect.insetBy(dx: -1.5, dy: -1.5)).fill()
+            NSGraphicsContext.current?.cgContext.setBlendMode(.normal)
+            bolt.draw(in: boltRect)
+            return true
+        }
+        image.isTemplate = true
+        return image
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -126,6 +169,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         autoFixItem.state = monitor.autoFixLayout ? .on : .off
         holdItem.state = monitor.holdOnEnter ? .on : .off
         quietItem.state = monitor.checkWhileTyping ? .on : .off
+        emojiItem.state = monitor.llm.emojiMode ? .on : .off
         statusItem.button?.appearsDisabled = !monitor.isEnabled
         if let app = NSWorkspace.shared.frontmostApplication, let id = app.bundleIdentifier, id != Bundle.main.bundleIdentifier {
             excludeItem.title = "ไม่ใช้ใน \(app.localizedName ?? id)"
@@ -172,7 +216,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else if !monitor.isEnabled {
             statusLine.title = "ปิดอยู่"
         } else {
-            statusLine.title = fixCount == 0 ? "ทำงานอยู่ · กด Tab เพื่อแก้คำ" : "ทำงานอยู่ · แก้ไปแล้ว \(fixCount) ครั้ง"
+            var parts = [fixCount == 0 ? "ทำงานอยู่" : "แก้ไปแล้ว \(fixCount) ครั้ง"]
+            if let err = monitor.llm.lastError { parts.append("Claude: \(err)") }
+            else if monitor.llm.isReady, monitor.llm.lastLatency > 0 { parts.append(String(format: "Claude %.1f วิ", monitor.llm.lastLatency)) }
+            else if !monitor.llm.isReady { parts.append("Claude ยังไม่พร้อม") }
+            statusLine.title = parts.joined(separator: " · ")
         }
     }
 
@@ -193,6 +241,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggleAutoFix() {
         monitor.autoFixLayout.toggle()
         defaults.set(monitor.autoFixLayout, forKey: "autoFix")
+        refreshMenuState()
+    }
+
+    @objc private func toggleEmoji() {
+        monitor.llm.emojiMode.toggle()
+        defaults.set(monitor.llm.emojiMode, forKey: "emojiMode")
         refreshMenuState()
     }
 
