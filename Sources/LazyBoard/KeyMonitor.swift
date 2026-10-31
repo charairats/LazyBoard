@@ -60,7 +60,8 @@ final class KeyMonitor {
     private static let decisionGrace: TimeInterval = 1.5
     private var hold: Hold?
     private static let holdTimeout: TimeInterval = 10
-    private static let holdMinimumKeys = 4
+    /// Same floor as LLMSuggester.checkNow: a shorter line is never checked, so holding it would only wait for the timeout.
+    private static let holdMinimumKeys = 6
 
     init() {
         llm.onResult = { [weak self] original, reply in
@@ -166,6 +167,7 @@ final class KeyMonitor {
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             self?.frontBundleID = app?.bundleIdentifier
             self?.reset()
+            if let app = app { Caret.prepare(app) }
         }
         return true
     }
@@ -374,7 +376,10 @@ final class KeyMonitor {
             var chars = [UniChar](repeating: 0, count: 8)
             event.keyboardGetUnicodeString(maxStringLength: 8, actualStringLength: &length, unicodeString: &chars)
             guard length > 0 else { return passThrough }
-            let typed = String(utf16CodeUnits: chars, count: length)
+            let eventText = String(utf16CodeUnits: chars, count: length)
+            let typed = InputSource.resolved(eventText: eventText,
+                                             layoutText: InputSource.characters(keyCode: keyCode, flags: flags))
+            if typed != eventText { Log.write("key: event and layout disagree, using layout") }
             for sc in typed.unicodeScalars where sc.value < 0x20 || (0xF700...0xF8FF).contains(sc.value) {
                 reset()
                 return passThrough
@@ -462,8 +467,8 @@ final class KeyMonitor {
     private func evaluate() {
         let next = detector.suggest(buffer: buffer)
         if next == nil {
-            // Nothing layout-related: let the LLM layer look after a pause.
-            llm.textChanged(buffer)
+            // Nothing layout-related: let the LLM layer look after a pause, if asked to.
+            if checkWhileTyping { llm.textChanged(buffer) }
             if suggestion?.source == .llm { suggestion = nil; panel.hide() }
             else if suggestion != nil { suggestion = nil; panel.hide() }
             return

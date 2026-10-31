@@ -1,6 +1,6 @@
 import Cocoa
 
-/// A small glass capsule under the caret: the correction, a loading indicator, or a check mark.
+/// A small glass capsule above and to the right of the caret: the correction, a loading indicator, or a check mark.
 /// Uses the system Liquid Glass material on macOS 26 and a vibrancy material before that.
 final class SuggestionPanel {
     private let panel: NSPanel
@@ -14,9 +14,10 @@ final class SuggestionPanel {
 
     var isVisible: Bool { panel.isVisible && panel.alphaValue > 0.01 }
 
-    private static let textFont = NSFont.systemFont(ofSize: 13, weight: .medium)
     private static let secondaryFont = NSFont.systemFont(ofSize: 13, weight: .regular)
     private static let keyFont = NSFont.systemFont(ofSize: 10, weight: .semibold)
+    /// Mid gray reads over both light and dark glass.
+    private static let highlightColor = NSColor.gray.withAlphaComponent(0.3)
     private static let padding = NSEdgeInsets(top: 7, left: 12, bottom: 7, right: 9)
 
     init() {
@@ -146,7 +147,7 @@ final class SuggestionPanel {
         if let symbol = NSImage(systemSymbolName: "checkmark", accessibilityDescription: "ok") {
             image.image = symbol.withSymbolConfiguration(.init(pointSize: 11, weight: .bold))
         }
-        image.contentTintColor = .secondaryLabelColor
+        image.contentTintColor = .labelColor
         rows.addArrangedSubview(image)
         setKeys("")
         layoutAndPresent(near: point, maxWidth: 60)
@@ -252,11 +253,13 @@ final class SuggestionPanel {
         let result = NSMutableAttributedString()
         for piece in pieces {
             let strong = piece.emphasised
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: strong ? NSFont.systemFont(ofSize: 13, weight: .semibold) : (selected ? textFont : secondaryFont),
-                .foregroundColor: strong ? (selected ? NSColor.labelColor : NSColor.secondaryLabelColor.blended(withFraction: 0.3, of: .labelColor) ?? .secondaryLabelColor)
-                                         : NSColor.secondaryLabelColor.withAlphaComponent(selected ? 0.9 : 0.6),
+            // Glass flips labelColor to suit what is behind it, but not colours derived from it (alpha, blends):
+            // those stay dark over a dark window in light mode. So every run is plain labelColor.
+            var attrs: [NSAttributedString.Key: Any] = [
+                .font: strong ? NSFont.systemFont(ofSize: 13, weight: selected ? .semibold : .medium) : secondaryFont,
+                .foregroundColor: NSColor.labelColor,
             ]
+            if strong, pieces.count > 1 { attrs[.backgroundColor] = highlightColor }
             result.append(NSAttributedString(string: piece.text, attributes: attrs))
         }
         return result
@@ -283,12 +286,12 @@ final class SuggestionPanel {
             badge.wantsLayer = true
             badge.layer?.cornerRadius = 5
             badge.layer?.cornerCurve = .continuous
-            badge.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.07).cgColor
+            badge.layer?.backgroundColor = NSColor.gray.withAlphaComponent(0.2).cgColor
             badge.layer?.borderWidth = 0.5
-            badge.layer?.borderColor = NSColor.labelColor.withAlphaComponent(0.12).cgColor
+            badge.layer?.borderColor = NSColor.gray.withAlphaComponent(0.4).cgColor
             let label = NSTextField(labelWithString: part)
             label.font = Self.keyFont
-            label.textColor = .secondaryLabelColor
+            label.textColor = .labelColor
             label.translatesAutoresizingMaskIntoConstraints = false
             badge.addSubview(label)
             NSLayoutConstraint.activate([
@@ -308,12 +311,12 @@ final class SuggestionPanel {
         let fitting = stack.fittingSize
         let width = min(max(fitting.width, 44), maxWidth)
         let height = max(fitting.height, 30)
-        var origin = NSPoint(x: point.x - 6, y: point.y - 5 - height)
+        var origin = NSPoint(x: point.x + 4, y: point.y + 4)
         let screen = NSScreen.screens.first(where: { $0.frame.contains(point) }) ?? NSScreen.main
         if let vf = screen?.visibleFrame {
             if origin.x + width > vf.maxX { origin.x = vf.maxX - width - 8 }
             if origin.x < vf.minX { origin.x = vf.minX + 8 }
-            if origin.y < vf.minY { origin.y = point.y + 22 }
+            if origin.y + height > vf.maxY { origin.y = point.y - 26 - height }
         }
         let frame = NSRect(origin: origin, size: NSSize(width: width, height: height))
         if panel.isVisible && panel.alphaValue > 0.5 {
@@ -331,7 +334,7 @@ final class SuggestionPanel {
     }
 }
 
-/// Minimal typing indicator: three 5pt dots in the label colour, bouncing in turn.
+/// Minimal typing indicator: three 5pt mid-gray dots (readable over any glass), bouncing in turn.
 final class LoadingDots: NSView {
     private var dotLayers: [CALayer] = []
     private let count = 3
@@ -350,21 +353,14 @@ final class LoadingDots: NSView {
             let dot = CALayer()
             dot.frame = CGRect(x: CGFloat(i) * (size + gap), y: 4, width: size, height: size)
             dot.cornerRadius = size / 2
-            dot.backgroundColor = NSColor.labelColor.cgColor
-            dot.opacity = 0.35
+            dot.backgroundColor = NSColor.gray.cgColor
+            dot.opacity = 0.5
             layer?.addSublayer(dot)
             dotLayers.append(dot)
         }
     }
 
     required init?(coder: NSCoder) { fatalError() }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        effectiveAppearance.performAsCurrentDrawingAppearance {
-            for dot in dotLayers { dot.backgroundColor = NSColor.labelColor.cgColor }
-        }
-    }
 
     func start() {
         let now = CACurrentMediaTime()
@@ -376,7 +372,7 @@ final class LoadingDots: NSView {
             bounce.timingFunctions = [CAMediaTimingFunction(name: .easeOut), CAMediaTimingFunction(name: .easeIn)]
             bounce.duration = 0.5
             let fade = CAKeyframeAnimation(keyPath: "opacity")
-            fade.values = [0.35, 0.9, 0.35]
+            fade.values = [0.5, 1, 0.5]
             fade.keyTimes = [0, 0.5, 1]
             fade.duration = 0.5
             let group = CAAnimationGroup()

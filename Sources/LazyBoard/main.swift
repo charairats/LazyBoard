@@ -3,6 +3,10 @@ import Cocoa
 if CommandLine.arguments.contains("--test") {
     exit(SelfTest.run())
 }
+if CommandLine.arguments.contains("--caret") {
+    Caret.probe()
+    exit(0)
+}
 if let i = CommandLine.arguments.firstIndex(of: "--try"), i + 1 < CommandLine.arguments.count {
     let text = CommandLine.arguments[(i + 1)...].joined(separator: " ")
     if let s = Detector.shared.suggest(buffer: text) {
@@ -33,6 +37,7 @@ if let i = CommandLine.arguments.firstIndex(of: "--llm"), i + 1 < CommandLine.ar
     if let m = ProcessInfo.processInfo.environment["LAZYBOARD_MODEL"], let model = LLMSuggester.Model(rawValue: m) { llm.model = model }
     llm.backend = ProcessInfo.processInfo.environment["LAZYBOARD_BACKEND"] == "api" ? .api : .claudeCLI
     llm.emojiMode = ProcessInfo.processInfo.environment["LAZYBOARD_EMOJI"] == "1"
+    llm.polite = LLMSuggester.Polite(rawValue: ProcessInfo.processInfo.environment["LAZYBOARD_POLITE"] ?? "") ?? .off
     guard llm.isReady else {
         print(llm.backend == .api ? "no API key: set ANTHROPIC_API_KEY or save one from the LazyBoard menu"
                                   : "claude CLI not found (install Claude Code)")

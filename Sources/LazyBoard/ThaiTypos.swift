@@ -15,6 +15,9 @@ enum ThaiTypos {
     /// Words that genuinely carry ๋; anything else with ๋ almost certainly meant ่.
     static let maiChattawaWords: Set<String> = ["จ๋า", "ก๋วยเตี๋ยว", "เตี๋ยว", "ก๋ง", "จุ๋มจิ๋ม", "ตุ๋น", "ป๋า", "ม๋า", "น๋า", "ย๋า", "ป๋อ", "ก๋า", "ตั๋ว", "หยิ๋ว", "จิ๋ว", "ตี๋"]
 
+    /// Endings that always take คะ, never ค่ะ. Not เปล่า or อะไร alone: "เปล่าค่ะ" and "ไม่มีอะไรค่ะ" are correct answers.
+    static let khaEndings = ["นะ", "มั้ย", "ไหม", "หรอ", "เหรอ", "หรือ", "หรือเปล่า", "รึเปล่า"]
+
     /// A corrected spelling for `word`, or nil when nothing confident applies.
     static func fix(_ word: String) -> String? {
         guard word.unicodeScalars.contains(where: KeyMap.isThai) else { return nil }
@@ -37,6 +40,10 @@ enum ThaiTypos {
                     break
                 }
             }
+        }
+        // นะค่ะ, ไหมค่ะ: the classic wrong tone on the particle.
+        if khaEndings.contains(where: { fixed.hasSuffix($0 + "ค่ะ") }) {
+            fixed = String(fixed.dropLast("ค่ะ".count)) + "คะ"
         }
         return fixed == word ? nil : fixed
     }

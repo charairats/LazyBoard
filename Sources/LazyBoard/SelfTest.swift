@@ -123,12 +123,37 @@ enum SelfTest {
         check("changed words emphasised", single.filter(\.emphasised).map(\.text).joined() == "กำลังทดสอบคีย์บอร์ด ต้องให้",
               single.map { ($0.emphasised ? "[" : "") + $0.text + ($0.emphasised ? "]" : "") }.joined())
 
+        print("\n== key events after a layout switch ==")
+        expect("จีนเทาได้เลยปะ deploy s,fpy'", "หมดยัง", .englishToThai)
+        check("stale Thai event on ABC uses the layout", InputSource.resolved(eventText: "ง", layoutText: "'") == "'")
+        check("stale English event on Thai uses the layout", InputSource.resolved(eventText: "'", layoutText: "ง") == "ง")
+        check("same script keeps the event", InputSource.resolved(eventText: "A", layoutText: "a") == "A")
+        check("no layout data keeps the event", InputSource.resolved(eventText: "ง", layoutText: nil) == "ง")
+        let abc = InputSource.layout(id: "com.apple.keylayout.ABC"), thai = InputSource.layout(id: "com.apple.keylayout.Thai")
+        check("ABC layout: s", InputSource.characters(keyCode: 1, flags: [], on: abc) == "s")
+        check("ABC layout: shift+s", InputSource.characters(keyCode: 1, flags: .maskShift, on: abc) == "S")
+        check("Thai layout: s = ห", InputSource.characters(keyCode: 1, flags: [], on: thai) == "ห")
+        check("Thai layout: ' = ง", InputSource.characters(keyCode: 39, flags: [], on: thai) == "ง")
+
         print("\n== emoji mode helpers ==")
         check("strip trailing emoji", LLMSuggester.strippingTrailingEmoji("เสร็จแล้วค่ะ 🎉✨") == "เสร็จแล้วค่ะ")
         check("strip skin-tone emoji", LLMSuggester.strippingTrailingEmoji("ขอบคุณนะคะ 🙏🏻") == "ขอบคุณนะคะ")
         check("only adds emoji", LLMSuggester.onlyAddsEmoji(original: "ส่ง PR แล้วนะ", fixed: "ส่ง PR แล้วนะ 🚀"))
         check("not only emoji when a word changed", !LLMSuggester.onlyAddsEmoji(original: "ส่ง PR แล้วนะ", fixed: "ส่ง PR แล้วนะคะ 🚀"))
         check("not only emoji when nothing added", !LLMSuggester.onlyAddsEmoji(original: "ส่ง PR แล้วนะ", fixed: "ส่ง PR แล้วนะ"))
+
+        print("\n== ค่ะ / คะ ==")
+        for (bad, good) in [("นะค่ะ", "นะคะ"), ("สวัสดีนะค่ะ", "สวัสดีนะคะ"), ("มั้ยค่ะ", "มั้ยคะ"), ("สวยไหมค่ะ", "สวยไหมคะ"),
+                            ("จริงหรอค่ะ", "จริงหรอคะ"), ("ใช่หรือเปล่าค่ะ", "ใช่หรือเปล่าคะ")] {
+            check("typo \(bad) -> \(good)", ThaiTypos.fix(bad) == good, "got \(ThaiTypos.fix(bad) ?? "nil")")
+        }
+        for ok in ["ค่ะ", "ได้ค่ะ", "เปล่าค่ะ", "ไม่มีอะไรค่ะ", "ขอบคุณค่ะ", "นะคะ", "ไหมคะ"] {
+            check("untouched \(ok)", ThaiTypos.fix(ok) == nil, "got \(ThaiTypos.fix(ok) ?? "nil")")
+        }
+
+        print("\n== polite mode ==")
+        check("off adds nothing to the request", !LLMSuggester.userMessage(for: "ส่งงานด้วย").contains("polite"))
+        check("on names the particle", LLMSuggester.userMessage(for: "ส่งงานด้วย", polite: .kha).contains("\"polite\":\"ค่ะ\""))
 
         print("\n== typing test scoring ==")
         check("identical = 100%", TypingTest.accuracy(typed: "สวัสดีค่ะ", target: "สวัสดีค่ะ") == 1)

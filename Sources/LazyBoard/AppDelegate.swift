@@ -13,6 +13,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let autoFixItem = NSMenuItem(title: "แก้พิมพ์ค้างคีย์บอร์ดให้เองตอนเคาะ space/Enter (Esc ย้อนกลับ)", action: #selector(toggleAutoFix), keyEquivalent: "")
     private let holdItem = NSMenuItem(title: "อม Enter ไว้ให้ Claude ตรวจก่อนส่ง (Ctrl+Enter = ส่งเลย)", action: #selector(toggleHold), keyEquivalent: "")
     private let emojiItem = NSMenuItem(title: "โหมดอีโมจิ: เติมท้ายข้อความ 1–2 ตัวตอนส่ง", action: #selector(toggleEmoji), keyEquivalent: "")
+    private let politeItem = NSMenuItem(title: "โหมดสุภาพ (สื่อสารในที่ทำงาน)", action: nil, keyEquivalent: "")
+    private let politeMenu = NSMenu()
     private let quietItem = NSMenuItem(title: "ให้ Claude ตรวจเงียบๆ ระหว่างหยุดพิมพ์ด้วย", action: #selector(toggleQuiet), keyEquivalent: "")
     private let testItem = NSMenuItem(title: "แบบทดสอบการพิมพ์…", action: #selector(openTypingTest), keyEquivalent: "")
     private let excludeItem = NSMenuItem(title: "ไม่ใช้ในแอปนี้", action: #selector(toggleExclude), keyEquivalent: "")
@@ -37,6 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         monitor.holdOnEnter = defaults.bool(forKey: "holdOnEnter")
         monitor.checkWhileTyping = defaults.bool(forKey: "checkWhileTyping")
         monitor.llm.emojiMode = defaults.bool(forKey: "emojiMode")
+        monitor.llm.polite = LLMSuggester.Polite(rawValue: defaults.string(forKey: "politeMode") ?? "") ?? .off
         monitor.excludedBundleIDs = Set(defaults.stringArray(forKey: "excluded") ?? [])
         monitor.llm.isEnabled = defaults.bool(forKey: "llmEnabled")
         monitor.llm.model = LLMSuggester.Model(rawValue: defaults.string(forKey: "llmModel") ?? "") ?? .haiku
@@ -94,7 +97,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         enabledItem.title = "เปิดใช้งาน"
         holdItem.title = "ตรวจด้วย Claude ก่อนส่ง (Ctrl+Enter ข้าม)"
         emojiItem.title = "เติมอีโมจิท้ายข้อความ"
-        for item in [enabledItem, holdItem, emojiItem, excludeItem] {
+        for polite in LLMSuggester.Polite.allCases {
+            let item = NSMenuItem(title: polite.title, action: #selector(selectPolite(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = polite.rawValue
+            politeMenu.addItem(item)
+        }
+        politeItem.submenu = politeMenu
+        for item in [enabledItem, holdItem, emojiItem, politeItem, excludeItem] {
             item.target = self
             menu.addItem(item)
         }
@@ -181,6 +191,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         holdItem.state = monitor.holdOnEnter ? .on : .off
         quietItem.state = monitor.checkWhileTyping ? .on : .off
         emojiItem.state = monitor.llm.emojiMode ? .on : .off
+        politeItem.state = monitor.llm.polite != .off ? .on : .off
+        for item in politeMenu.items {
+            item.state = (item.representedObject as? String) == monitor.llm.polite.rawValue ? .on : .off
+        }
         statusItem.button?.appearsDisabled = !monitor.isEnabled
         if let app = NSWorkspace.shared.frontmostApplication, let id = app.bundleIdentifier, id != Bundle.main.bundleIdentifier {
             excludeItem.title = "ไม่ใช้ใน \(app.localizedName ?? id)"
@@ -258,6 +272,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggleEmoji() {
         monitor.llm.emojiMode.toggle()
         defaults.set(monitor.llm.emojiMode, forKey: "emojiMode")
+        refreshMenuState()
+    }
+
+    @objc private func selectPolite(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let polite = LLMSuggester.Polite(rawValue: raw) else { return }
+        monitor.llm.polite = polite
+        defaults.set(raw, forKey: "politeMode")
         refreshMenuState()
     }
 

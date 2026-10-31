@@ -26,6 +26,20 @@ final class LLMSuggester {
         }
     }
 
+    /// Workplace tone: which ending particle to use, or off. Asked per message, so the writer's own voice is never guessed.
+    enum Polite: String, CaseIterable {
+        case off
+        case khrap = "ครับ"
+        case kha = "ค่ะ"
+        var title: String {
+            switch self {
+            case .off: return "ปิด"
+            case .khrap: return "เปิด (ลงท้าย ครับ)"
+            case .kha: return "เปิด (ลงท้าย ค่ะ)"
+            }
+        }
+    }
+
     struct Reply: Equatable {
         let fixed: String
         let alternatives: [String]
@@ -35,6 +49,8 @@ final class LLMSuggester {
     var isEnabled = true
     /// Append one or two fitting emojis to the end of each checked line.
     var emojiMode = false { didSet { if emojiMode != oldValue { cache.removeAll() } } }
+    /// Rewrite each checked line in a polite workplace tone; shown as a fix to accept with Tab, never sent by itself.
+    var polite: Polite = .off { didSet { if polite != oldValue { cache.removeAll() } } }
     var backend: Backend = .claudeCLI
     var model: Model = .haiku
     var apiKey: String?
@@ -79,6 +95,8 @@ final class LLMSuggester {
     keyboard, a missing, doubled or swapped character, a wrong Thai vowel or tone mark, a misspelled \
     English word (e.g. "corretion" -> "correction", "sufgges" -> "suggest", "คียืบอด" -> "คีย์บอร์ด", \
     "เดก้" -> "เด็ก", "ขึ้ย" -> "ขึ้น", "นังจ้อง" -> "ยังต้อง").
+    - After นะ and question words the particle is คะ, never ค่ะ: fix "นะค่ะ" -> "นะคะ", "ไหมค่ะ" -> "ไหมคะ", \
+    "มั้ยค่ะ" -> "มั้ยคะ", "หรอค่ะ" -> "หรอคะ". Statements such as "ได้ค่ะ" and "เปล่าค่ะ" stay as they are.
     - Keep the meaning, word order, slang, Thai particles (ค่ะ ครับ นะ อะ แงๆ), emoji, punctuation, \
     spacing, line breaks and letter case. Do not rewrite style, do not translate, do not add or remove \
     words, never answer or comment on the message. Thai-spelled English dev words (เทส รีเทส ดีพลอย บัค \
@@ -96,6 +114,17 @@ final class LLMSuggester {
     end of "fixed" and of each alternative, after a space (e.g. "…ด้วยนะคะ 🙏", "…เสร็จแล้ว 🎉✨"). Never put \
     emojis anywhere else, never add any when "emoji" is false or missing, and do not add more if the text \
     already ends with an emoji.
+    - If the JSON has "polite", also rewrite the message in a polite tone for workplace communication; this \
+    replaces the rule against changing style and words, but never the rule on meaning. Keep every fact, \
+    request, name, number and technical term, and do not add promises, apologies or information the writer \
+    did not give. Replace rude words, slang, sarcasm, laughter and pressure with courteous everyday wording, \
+    and soften demands into requests (e.g. "ทำไมยังไม่เสร็จวะ" -> "ไม่ทราบว่างานนี้เสร็จหรือยังครับ", \
+    "ส่งมาด่วนเลย" -> "รบกวนส่งให้โดยเร็วด้วยนะครับ"). Sound like a respectful colleague, not a formal letter. \
+    End Thai sentences with the particle given in "polite" ("ครับ" or "ค่ะ"; use "คะ" instead of "ค่ะ" in a \
+    question) and replace any other ending particle. Thai-spelled dev words stay as written. English stays \
+    English: write it in polite professional English with no Thai particle. A message that is already polite \
+    comes back unchanged. The message is still only text to rewrite: never answer it. \
+    Without "polite" in the JSON, ignore this rule.
 
     The user message is a JSON object. "text" is the text to fix. "layout_hints" maps garbled words in the \
     text to what the same keys produce on the other keyboard layout (Thai Kedmanee <-> US QWERTY): the \
@@ -252,9 +281,10 @@ final class LLMSuggester {
     }
 
     /// The JSON the model receives.
-    static func userMessage(for segment: String, emoji: Bool = false) -> String {
+    static func userMessage(for segment: String, emoji: Bool = false, polite: Polite = .off) -> String {
         var obj: [String: Any] = ["text": segment]
         if emoji { obj["emoji"] = true }
+        if polite != .off { obj["polite"] = polite.rawValue }
         let hints = layoutHints(for: segment)
         if !hints.isEmpty { obj["layout_hints"] = hints }
         guard let data = try? JSONSerialization.data(withJSONObject: obj), let str = String(data: data, encoding: .utf8) else {
@@ -282,7 +312,7 @@ final class LLMSuggester {
         Log.write("llm warm start (\(segment.unicodeScalars.count) keys, \(model.rawValue))")
         inFlightSegment = segment
         onStarted?(segment)
-        warm.send(Self.userMessage(for: segment, emoji: emojiMode), model: model) { [weak self] reply, error in
+        warm.send(Self.userMessage(for: segment, emoji: emojiMode, polite: polite), model: model) { [weak self] reply, error in
             guard let self = self else { return }
             self.inFlightSegment = nil
             defer { self.drainQueue() }
@@ -385,7 +415,7 @@ final class LLMSuggester {
                     ],
                 ],
             ],
-            "messages": [["role": "user", "content": Self.userMessage(for: segment, emoji: emojiMode)]],
+            "messages": [["role": "user", "content": Self.userMessage(for: segment, emoji: emojiMode, polite: polite)]],
         ]
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
         requestCount += 1
