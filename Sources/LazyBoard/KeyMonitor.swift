@@ -173,6 +173,7 @@ final class KeyMonitor {
     }
 
     func reset() {
+        if hold != nil { Log.write("hold dropped: click, shortcut or app switch") }
         showWork?.cancel()
         buffer = ""
         suggestion = nil
@@ -292,6 +293,10 @@ final class KeyMonitor {
                 }
                 return nil
             }
+            if Caret.keysAreNotTyping() {
+                reset()
+                return passThrough
+            }
             var fixedFirst = false
             if let s = autoFixCandidate() {
                 Log.write("auto layout fix on enter (\(s.scalarCount) keys)")
@@ -372,6 +377,11 @@ final class KeyMonitor {
             return passThrough
 
         default:
+            // A held key is not typing (walking in a game), and the buffer can no longer match the field.
+            if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
+                reset()
+                return passThrough
+            }
             var length = 0
             var chars = [UniChar](repeating: 0, count: 8)
             event.keyboardGetUnicodeString(maxStringLength: 8, actualStringLength: &length, unicodeString: &chars)
@@ -386,6 +396,8 @@ final class KeyMonitor {
             }
             buffer.unicodeScalars.append(contentsOf: typed.unicodeScalars)
             trimBuffer()
+            // Have Claude running by the time this line reaches Enter.
+            if holdOnEnter { llm.prewarm() }
             evaluate()
             if typed == " " {
                 if let s = autoFixCandidate() {
@@ -429,7 +441,8 @@ final class KeyMonitor {
         var start = scalars.count - 1
         while start > 0, scalars[start - 1] != " ", scalars[start - 1] != "\n" { start -= 1 }
         let word = String(String.UnicodeScalarView(scalars[start..<(scalars.count - 1)]))
-        guard !word.isEmpty, !detector.ignoredWords.contains(word), let fixed = ThaiTypos.fix(word) else { return nil }
+        guard !word.isEmpty, !detector.ignoredWords.contains(word), let fixed = ThaiTypos.fix(word),
+              !Caret.keysAreNotTyping() else { return nil }
         return Suggestion(scalarCount: word.unicodeScalars.count + 1, replacement: fixed + " ", direction: nil, source: .layout)
     }
 
@@ -471,6 +484,10 @@ final class KeyMonitor {
             if checkWhileTyping { llm.textChanged(buffer) }
             if suggestion?.source == .llm { suggestion = nil; panel.hide() }
             else if suggestion != nil { suggestion = nil; panel.hide() }
+            return
+        }
+        if Caret.keysAreNotTyping() {
+            reset()
             return
         }
         llm.cancel()

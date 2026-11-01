@@ -15,7 +15,9 @@ final class WarmClaude {
     private var runningModel: LLMSuggester.Model?
     private var idleTimer: Timer?
     private var requestStart: Date?
+    private var lastPrewarm = Date.distantPast
 
+    private let prewarmInterval: TimeInterval = 30
     private let maxTurnsPerProcess = 25
     private let idleTimeout: TimeInterval = 10 * 60
     private let requestTimeout: TimeInterval = 25
@@ -115,8 +117,13 @@ final class WarmClaude {
     }
 
     /// Start the process ahead of the first request so it does not pay the start-up cost.
+    /// Called on every keystroke, so a process that keeps dying is retried only now and then.
     func prewarm(model: LLMSuggester.Model) {
-        guard proc?.isRunning != true else { return }
+        guard !isBusy else { return }
+        if proc?.isRunning == true, runningModel == model, turns < maxTurnsPerProcess { return }
+        guard Date().timeIntervalSince(lastPrewarm) >= prewarmInterval else { return }
+        lastPrewarm = Date()
+        stop()
         if start(model: model) { touchIdleTimer() }
     }
 

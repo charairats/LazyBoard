@@ -359,6 +359,7 @@ final class LLMSuggester {
         process = nil
         processID += 1
         warmRequestID += 1 // a warm reply still in flight will be ignored
+        inFlightSegment = nil // so the same line asked again is queued, not assumed to be on its way
     }
 
     /// Start the background claude process early (CLI backend only).
