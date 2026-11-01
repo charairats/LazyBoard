@@ -3,6 +3,9 @@ import Cocoa
 if CommandLine.arguments.contains("--test") {
     exit(SelfTest.run())
 }
+if CommandLine.arguments.contains("--stats") {
+    exit(Stats.run())
+}
 if CommandLine.arguments.contains("--caret") {
     Caret.probe()
     exit(0)

@@ -42,8 +42,8 @@ enum SelfTest {
         expect("F,'", "โมง")
         expect("แล้วนะ iv", "รอ")                                          // iv is a dictionary entry, but รอ wins
         expect(".o", "ใน")   // c]g; in the test run was a typo on top: แลเว, left to the LLM hint
-        // one slipped key (eeuj = ำำี่) inside a long run must still be fixed
-        expect("สวัสดีค่ะ เออเริ่ด 8jteeuj;yoouhso^de]y'mflv[it[[vp^j8jt", "ค่ะำำี่วันนี้หนูกำลังทดสอบระบบอยู่ค่ะ")
+        // one slipped key (eeuj = ำำี่) leaves something that is not Thai words: left to the LLM check, never converted
+        expect("สวัสดีค่ะ เออเริ่ด 8jteeuj;yoouhso^de]y'mflv[it[[vp^j8jt", nil)
         expect("8jt ;yoouhso^de]y'mflv[it[[vp^j8jt", "ค่ะ วันนี้หนูกำลังทดสอบระบบอยู่ค่ะ")
 
         print("\n== Thai layout, meant English ==")
@@ -162,6 +162,33 @@ enum SelfTest {
         check("two swapped letters ≈ 82%", abs(one - (1 - 2.0 / 11.0)) < 0.001, String(format: "%.3f", one))
         check("trailing space ignored", TypingTest.accuracy(typed: "ส่ง PR แล้ว ", target: "ส่ง PR แล้ว") == 1)
         check("letter case ignored", TypingTest.accuracy(typed: "ส่ง pr แล้วนะ รอ review", target: "ส่ง PR แล้วนะ รอ review") == 1)
+
+        print("\n== word check on both sides ==")
+        expect("gfjo", "เด่น", .englishToThai)
+        expect("gfbo", "เดิน", .englishToThai)
+        expect("Fff", "โดด", .englishToThai)
+        expect("iu[", "รีบ", .englishToThai)
+        expect("Fff gfjo gfbo ", "โดด เด่น เดิน ", .englishToThai)
+        expect("cloudfailre ", nil)
+        expect("cloudflare ", nil)
+        expect("relocator ", nil)
+        expect("cosmetic: ", nil)
+        expect("cosmetic; ", nil)
+        expect("description: ", nil)
+        expect("key:value ", nil)
+        expect("name=value ", nil)
+        expect("[cosmetic] ", nil)
+        expect("input/output ", nil)
+        expect("and/or ", nil)
+        expect("lazyboard ", nil)
+        expect("กอกก", nil)
+        expect("กอขกก", nil)
+        expect("กกขกอ", nil)
+        expect("html", nil)
+        expect("hello", nil)
+        expect("df ", nil)
+        expect("django ", nil)
+        expect("canva ", nil)
 
         print("\n\(failures == 0 ? "ALL PASSED" : "\(failures) FAILED")")
         return failures == 0 ? 0 : 1

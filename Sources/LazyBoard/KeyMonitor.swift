@@ -38,6 +38,7 @@ final class KeyMonitor {
         var original: String
         var replacementScalars: Int
         var expires: Date
+        var bufferAfter: String
     }
     private var lastAuto: AutoFix?
     private static let undoWindow: TimeInterval = 4
@@ -271,6 +272,10 @@ final class KeyMonitor {
             return passThrough
 
         case kVK_Delete:
+            // Backspace as the very next key after an automatic fix: most likely a wrong fix.
+            if let auto = lastAuto, Date() <= auto.expires, buffer == auto.bufferAfter {
+                Log.write("auto fix backspaced right away")
+            }
             if !buffer.unicodeScalars.isEmpty {
                 buffer.unicodeScalars.removeLast()
                 evaluate()
@@ -574,7 +579,7 @@ final class KeyMonitor {
         buffer = String(String.UnicodeScalarView(scalars)) + s.replacement
         lastAuto = automatic
             ? AutoFix(original: original, replacementScalars: s.replacement.unicodeScalars.count,
-                      expires: Date().addingTimeInterval(Self.undoWindow))
+                      expires: Date().addingTimeInterval(Self.undoWindow), bufferAfter: buffer)
             : nil
 
         if switchLayoutAfterFix, let direction = s.direction {
