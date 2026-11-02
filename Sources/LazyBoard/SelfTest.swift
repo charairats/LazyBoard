@@ -161,6 +161,10 @@ enum SelfTest {
         check("off adds nothing to the request", !LLMSuggester.userMessage(for: "ส่งงานด้วย").contains("polite"))
         check("on names the particle", LLMSuggester.userMessage(for: "ส่งงานด้วย", polite: .kha).contains("\"polite\":\"ค่ะ\""))
 
+        print("\n== request JSON ==")
+        let slashes = LLMSuggester.userMessage(for: "to do / in progress/done")
+        check("slashes reach the model unescaped", slashes.contains("to do / in progress/done") && !slashes.contains("\\/"), slashes)
+
         print("\n== typing test scoring ==")
         check("identical = 100%", TypingTest.accuracy(typed: "สวัสดีค่ะ", target: "สวัสดีค่ะ") == 1)
         check("empty typed = 0%", TypingTest.accuracy(typed: "", target: "abc") == 0)

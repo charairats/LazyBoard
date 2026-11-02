@@ -289,7 +289,7 @@ final class LLMSuggester {
         if polite != .off { obj["polite"] = polite.rawValue }
         let hints = layoutHints(for: segment)
         if !hints.isEmpty { obj["layout_hints"] = hints }
-        guard let data = try? JSONSerialization.data(withJSONObject: obj), let str = String(data: data, encoding: .utf8) else {
+        guard let data = try? JSONSerialization.data(withJSONObject: obj, options: .withoutEscapingSlashes), let str = String(data: data, encoding: .utf8) else {
             return segment
         }
         return str
