@@ -20,7 +20,7 @@ final class WarmClaude {
     private let prewarmInterval: TimeInterval = 30
     private let maxTurnsPerProcess = 25
     private let idleTimeout: TimeInterval = 10 * 60
-    private let requestTimeout: TimeInterval = 25
+    private let requestTimeout: TimeInterval = 60
 
     var isBusy: Bool { pending != nil }
     var isRunning: Bool { proc?.isRunning == true }

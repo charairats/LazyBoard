@@ -60,7 +60,8 @@ final class KeyMonitor {
     /// Enter pressed right as the fix appears was meant for the waiting state, not for "send as typed".
     private static let decisionGrace: TimeInterval = 1.5
     private var hold: Hold?
-    private static let holdTimeout: TimeInterval = 10
+    /// A long message takes longer to come back in full.
+    private static func holdTimeout(forKeys keys: Int) -> TimeInterval { 10 + Double(keys) / 50 }
     /// Same floor as LLMSuggester.checkNow: a shorter line is never checked, so holding it would only wait for the timeout.
     private static let holdMinimumKeys = 6
 
@@ -70,10 +71,7 @@ final class KeyMonitor {
             // Emoji mode: nothing to fix but the emojis — add them and carry on without asking.
             if self.llm.emojiMode, let h = self.hold, h.segment == original,
                LLMSuggester.onlyAddsEmoji(original: original, fixed: reply.fixed) {
-                let all = Array(self.buffer.unicodeScalars)
-                var spaces = 0
-                while spaces < all.count, all[all.count - 1 - spaces] == " " { spaces += 1 }
-                let trailing = String(repeating: " ", count: spaces)
+                let trailing = self.trailingBlanks()
                 let s = Suggestion(scalarCount: original.unicodeScalars.count + trailing.unicodeScalars.count,
                                    replacement: reply.fixed, direction: nil, source: .llm)
                 if self.buffer.hasSuffix(original + trailing) {
@@ -318,12 +316,12 @@ final class KeyMonitor {
             }
             if holdOnEnter, llm.isReady {
                 // The buffer forgets text after a mouse click or arrow key; the field itself does not.
-                let bufferLine = LLMSuggester.segment(of: buffer)
+                // Only the line the caret is on: the field can hold a whole document or terminal scrollback.
+                let bufferLine = LLMSuggester.lastLine(of: buffer)
                 if let line = Caret.focusedLineAtEnd() {
-                    let axLine = LLMSuggester.segment(of: line)
-                    if axLine != bufferLine, axLine.unicodeScalars.count > bufferLine.unicodeScalars.count {
-                        Log.write("enter: using field text (\(axLine.unicodeScalars.count) keys) instead of buffer (\(bufferLine.unicodeScalars.count))")
-                        buffer = line
+                    if line != bufferLine, line.unicodeScalars.count > bufferLine.unicodeScalars.count {
+                        Log.write("enter: using field text (\(line.unicodeScalars.count) keys) instead of buffer (\(bufferLine.unicodeScalars.count))")
+                        buffer = String(buffer.unicodeScalars.dropLast(bufferLine.unicodeScalars.count)) + line
                     }
                 }
                 let segment = LLMSuggester.segment(of: buffer)
@@ -338,7 +336,7 @@ final class KeyMonitor {
                     Log.write("hold enter (\(segment.unicodeScalars.count) keys)")
                     panel.showLoading(near: Caret.anchorPoint())
                     let startedAt = hold!.started
-                    DispatchQueue.main.asyncAfter(deadline: .now() + Self.holdTimeout) { [weak self] in
+                    DispatchQueue.main.asyncAfter(deadline: .now() + Self.holdTimeout(forKeys: segment.unicodeScalars.count)) { [weak self] in
                         guard let self = self, let h = self.hold, h.started == startedAt, !h.decided else { return }
                         Log.write("hold timeout")
                         self.llm.markChecked(h.segment)
@@ -475,11 +473,18 @@ final class KeyMonitor {
     }
 
     private func trimBuffer() {
-        let scalars = buffer.unicodeScalars
-        guard scalars.count > 300 else { return }
-        var idx = scalars.index(scalars.endIndex, offsetBy: -200)
-        while idx < scalars.endIndex, scalars[idx] != " ", scalars[idx] != "\n" { idx = scalars.index(after: idx) }
-        buffer = String(scalars[idx...])
+        let scalars = Array(buffer.unicodeScalars)
+        guard scalars.count > LLMSuggester.maxSegmentKeys + 500 else { return }
+        let start = LLMSuggester.wordStart(in: scalars, from: scalars.count - LLMSuggester.maxSegmentKeys)
+        buffer = String(String.UnicodeScalarView(scalars[start...]))
+    }
+
+    /// The spaces and line breaks that end the buffer.
+    private func trailingBlanks() -> String {
+        let scalars = Array(buffer.unicodeScalars)
+        var count = 0
+        while count < scalars.count, [" ", "\n"].contains(scalars[scalars.count - 1 - count]) { count += 1 }
+        return String(String.UnicodeScalarView(scalars.suffix(count)))
     }
 
     private func evaluate() {
@@ -508,9 +513,8 @@ final class KeyMonitor {
         // The user may have typed on since the request went out: the segment must still end the buffer
         // (ignoring trailing spaces), or the result is stale.
         guard cycle == nil else { return }
-        var scalars = Array(buffer.unicodeScalars)
-        var trailing = ""
-        while let last = scalars.last, last == " " { scalars.removeLast(); trailing.append(" ") }
+        let trailing = trailingBlanks()
+        let scalars = Array(buffer.unicodeScalars.dropLast(trailing.unicodeScalars.count))
         let orig = Array(original.unicodeScalars)
         guard orig.count <= scalars.count, Array(scalars[(scalars.count - orig.count)...]) == orig else {
             Log.write("llm result stale, dropped")
@@ -608,7 +612,15 @@ final class KeyMonitor {
         tag(up); up.flags = flags; up.post(tap: .cghidEventTap)
     }
 
+    /// A line break goes out as Shift+Enter, since a plain Return would send the message in a chat app.
     private func postText(_ text: String, _ source: CGEventSource?) {
+        for (i, line) in text.components(separatedBy: "\n").enumerated() {
+            if i > 0 { postKey(kVK_Return, source, flags: .maskShift) }
+            postLine(line, source)
+        }
+    }
+
+    private func postLine(_ text: String, _ source: CGEventSource?) {
         let units = Array(text.utf16)
         var i = 0
         while i < units.count {

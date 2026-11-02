@@ -105,7 +105,13 @@ enum SelfTest {
 
         print("\n== multi-line buffers ==")
         expect("บรรทัดแรก journey\nmujgdujp;-hv'", "ที่เกี่ยวข้อง")
-        check("LLM segment is the last line only", LLMSuggester.segment(of: "line one here\nsecond line  ") == "second line")
+        check("LLM segment keeps every line", LLMSuggester.segment(of: "line one here\nsecond line \n ") == "line one here\nsecond line")
+        let thaiParagraph = String(repeating: "ก", count: 400) + " ท้าย"
+        check("LLM segment keeps a long Thai paragraph", LLMSuggester.segment(of: thaiParagraph) == thaiParagraph)
+        let endless = String(repeating: "ก", count: 2000)
+        check("LLM segment over the limit keeps the limit", LLMSuggester.segment(of: endless).unicodeScalars.count == LLMSuggester.maxSegmentKeys)
+        check("last line", LLMSuggester.lastLine(of: "one\ntwo three") == "two three")
+        check("layout hints cross lines", LLMSuggester.layoutHints(for: "hello\nหแรพยะ")["หแรพยะ"] != nil)
 
         print("\n== thai typo rules ==")
         for (bad, good) in [("เป้น", "เป็น"), ("เป้นไร", "เป็นไร"), ("ก้", "ก็"), ("เเล้ว", "แล้ว"), ("ไม๋", "ไม่"), ("เด้ก", "เด็ก"), ("เช้ค", "เช็ค")] {

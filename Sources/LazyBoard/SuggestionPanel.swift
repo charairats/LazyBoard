@@ -119,8 +119,12 @@ final class SuggestionPanel {
             }
             let label = NSTextField(labelWithAttributedString: Self.styled(displays[i], selected: isSelected))
             _ = option
-            label.lineBreakMode = .byTruncatingHead
-            label.maximumNumberOfLines = 1
+            // A fix to a whole paragraph must be readable before it is accepted.
+            label.lineBreakMode = .byWordWrapping
+            label.maximumNumberOfLines = 10
+            label.cell?.wraps = true
+            label.cell?.truncatesLastVisibleLine = true
+            label.preferredMaxLayoutWidth = 520
             label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             row.addArrangedSubview(label)
             rows.addArrangedSubview(row)

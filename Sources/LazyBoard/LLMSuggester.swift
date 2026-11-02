@@ -1,7 +1,7 @@
 import Foundation
 
 /// Second layer: after a short pause in typing, asks Claude to fix genuine typos
-/// (adjacent-key slips, wrong Thai vowels/tones, misspelled English) in the last sentence.
+/// (adjacent-key slips, wrong Thai vowels/tones, misspelled English) in the whole message.
 /// Only runs when the layout detector found nothing.
 final class LLMSuggester {
     enum Model: String, CaseIterable {
@@ -61,6 +61,7 @@ final class LLMSuggester {
     /// Segment that arrived while a request was in flight; requested when that one finishes.
     private var queuedSegment: String?
     var debounce: TimeInterval = 0.9
+    static let maxSegmentKeys = 1500
     /// (original segment, reply), only when something changed. Delivered on the main thread.
     var onResult: ((String, Reply) -> Void)?
     /// Every completed request (original, reply), changed or not. Used by the CLI test mode and the Enter hold.
@@ -81,7 +82,7 @@ final class LLMSuggester {
     private var backoffUntil = Date.distantPast
     private let session: URLSession = {
         let c = URLSessionConfiguration.ephemeral
-        c.timeoutIntervalForRequest = 12
+        c.timeoutIntervalForRequest = 60
         return URLSession(configuration: c)
     }()
 
@@ -103,10 +104,11 @@ final class LLMSuggester {
     เช็ค รัน คอมมิต) are normal and stay as written; never replace them with formal Thai.
     - Leave real names, product names, code identifiers, URLs and well-known abbreviations as typed, \
     unless the context makes the intended word obvious.
-    - "fixed" is your single best full correction of the whole text.
+    - "fixed" is your single best full correction of the whole text. The text may be several sentences or \
+    paragraphs: fix all of it and return all of it, every line, never only the last part.
     - When a broken word has more than one plausible intended reading, put up to 2 other complete \
     versions of the whole text in "alternatives" (each differing from "fixed" only in the ambiguous \
-    words). Otherwise "alternatives" is an empty array.
+    words). Otherwise, or when the text is longer than about 300 characters, "alternatives" is an empty array.
     - If there is nothing to fix, return the text unchanged with an empty "alternatives".
     - Each user message is a separate, independent text to fix. Never use earlier messages as context \
     and never refer to them.
@@ -235,7 +237,7 @@ final class LLMSuggester {
     static func layoutHints(for text: String) -> [String: String] {
         let d = Detector.shared
         var hints: [String: String] = [:]
-        for raw in text.split(separator: " ") {
+        for raw in text.split(whereSeparator: { $0 == " " || $0 == "\n" }) {
             let word = String(raw)
             let scalars = Array(word.unicodeScalars)
             guard scalars.count >= 2 else { continue }
@@ -374,17 +376,27 @@ final class LLMSuggester {
         warm.stop()
     }
 
-    /// Last line of the buffer, without trailing spaces, at most ~160 keystrokes.
+    /// The whole message: every line, without trailing blanks, at most maxSegmentKeys keystrokes.
     static func segment(of buffer: String) -> String {
         var scalars = Array(buffer.unicodeScalars)
-        if let nl = scalars.lastIndex(of: "\n") { scalars = Array(scalars[(nl + 1)...]) }
-        while let last = scalars.last, last == " " { scalars.removeLast() }
-        if scalars.count > 160 {
-            var start = scalars.count - 160
-            while start < scalars.count, scalars[start] != " " { start += 1 }
-            scalars = Array(scalars[min(start + 1, scalars.count)...])
+        while let last = scalars.last, last == " " || last == "\n" { scalars.removeLast() }
+        if scalars.count > maxSegmentKeys {
+            scalars = Array(scalars[wordStart(in: scalars, from: scalars.count - maxSegmentKeys)...])
         }
         return String(String.UnicodeScalarView(scalars))
+    }
+
+    /// Where to cut a long text at or just after `from`. Thai can go a long way without a space,
+    /// so give up on finding one soon rather than throw most of the text away.
+    static func wordStart(in scalars: [Unicode.Scalar], from: Int) -> Int {
+        let window = scalars[from..<min(from + 60, scalars.count)]
+        return window.firstIndex { $0 == " " || $0 == "\n" }.map { $0 + 1 } ?? from
+    }
+
+    /// The text after the last line break.
+    static func lastLine(of text: String) -> String {
+        guard let nl = text.unicodeScalars.lastIndex(of: "\n") else { return text }
+        return String(text.unicodeScalars[text.unicodeScalars.index(after: nl)...])
     }
 
     // MARK: Request
@@ -399,7 +411,7 @@ final class LLMSuggester {
 
         let body: [String: Any] = [
             "model": model.rawValue,
-            "max_tokens": 1024,
+            "max_tokens": 4096,
             "system": Self.systemPrompt,
             "output_config": [
                 "effort": "low",
