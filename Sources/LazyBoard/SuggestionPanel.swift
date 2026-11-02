@@ -134,13 +134,13 @@ final class SuggestionPanel {
     }
 
     /// Three small dots bouncing one after another: Claude is checking the text.
-    func showLoading(near point: NSPoint) {
+    func showLoading(near point: NSPoint, hint: String = "") {
         clearRows()
         rows.addArrangedSubview(dots)
-        setKeys("")
+        setKeys(hint)
         isLoading = true
         dots.start()
-        layoutAndPresent(near: point, maxWidth: 80)
+        layoutAndPresent(near: point, maxWidth: hint.isEmpty ? 80 : 240)
     }
 
     /// The line was checked and nothing needed fixing.

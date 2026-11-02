@@ -169,6 +169,16 @@ enum SelfTest {
         check("trailing space ignored", TypingTest.accuracy(typed: "ส่ง PR แล้ว ", target: "ส่ง PR แล้ว") == 1)
         check("letter case ignored", TypingTest.accuracy(typed: "ส่ง pr แล้วนะ รอ review", target: "ส่ง PR แล้วนะ รอ review") == 1)
 
+        print("\n== enter while checking ==")
+        check("double press still waits", !KeyMonitor.enterSendsWhileChecking(elapsed: 0.5))
+        check("later enter sends without waiting", KeyMonitor.enterSendsWhileChecking(elapsed: 4))
+
+        print("\n== tab after a fix ==")
+        check("double press ignored", KeyMonitor.tabIsAccidental(sinceFix: 0.2, repeated: false))
+        check("held key ignored", KeyMonitor.tabIsAccidental(sinceFix: 1.0, repeated: true))
+        check("deliberate second tab swaps", !KeyMonitor.tabIsAccidental(sinceFix: 1.0, repeated: false))
+        check("tab long after a fix is a normal tab", !KeyMonitor.tabIsAccidental(sinceFix: 3600, repeated: true))
+
         print("\n== word check on both sides ==")
         expect("gfjo", "เด่น", .englishToThai)
         expect("gfbo", "เดิน", .englishToThai)

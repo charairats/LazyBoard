@@ -60,6 +60,16 @@ final class KeyMonitor {
     /// Enter pressed right as the fix appears was meant for the waiting state, not for "send as typed".
     private static let decisionGrace: TimeInterval = 1.5
     private var hold: Hold?
+    /// Claude usually answers in about 4 seconds but can take 13: past this the writer may send without waiting.
+    private static let sendAnywayAfter: TimeInterval = 3
+    static func enterSendsWhileChecking(elapsed: TimeInterval) -> Bool { elapsed >= sendAnywayAfter }
+    private var lastTabFix = Date.distantPast
+    /// A second Tab this soon after a fix is a bounce or a double press, not a choice to swap it for another option.
+    private static let tabSettle: TimeInterval = 0.5
+    /// A key held down keeps repeating for as long as the swap window stays open, so repeats never count.
+    static func tabIsAccidental(sinceFix: TimeInterval, repeated: Bool) -> Bool {
+        sinceFix < tabSettle || (repeated && sinceFix < cycleWindow)
+    }
     /// A long message takes longer to come back in full.
     private static func holdTimeout(forKeys keys: Int) -> TimeInterval { 10 + Double(keys) / 50 }
     /// Same floor as LLMSuggester.checkNow: a shorter line is never checked, so holding it would only wait for the timeout.
@@ -84,7 +94,7 @@ final class KeyMonitor {
             self.showLLMResult(original: original, reply: reply)
         }
         llm.onStarted = { [weak self] _ in
-            guard let self = self, self.suggestion == nil, self.cycle == nil else { return }
+            guard let self = self, self.suggestion == nil, self.cycle == nil, !self.panel.isLoading else { return }
             self.panel.showLoading(near: Caret.anchorPoint())
         }
         llm.onFinished = { [weak self] original, reply in
@@ -230,11 +240,21 @@ final class KeyMonitor {
             panel.hide()
         }
 
+        if keyCode == kVK_Tab, !flags.contains(.maskShift) {
+            let repeated = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+            if Self.tabIsAccidental(sinceFix: Date().timeIntervalSince(lastTabFix), repeated: repeated) {
+                Log.write("tab ignored: right after a fix")
+                if repeated { lastTabFix = Date() }
+                return nil
+            }
+        }
+
         if let c = cycle {
             if Date() > c.expires {
                 cycle = nil
                 panel.hide()
             } else if keyCode == kVK_Tab && !flags.contains(.maskShift) {
+                lastTabFix = Date()
                 cycleNext()
                 return nil
             } else {
@@ -246,6 +266,7 @@ final class KeyMonitor {
         switch keyCode {
         case kVK_Tab:
             if let s = suggestion, !flags.contains(.maskShift) {
+                lastTabFix = Date()
                 if hold != nil {
                     // Fix the text in place; the user sends with Enter when they are happy with it.
                     apply(s)
@@ -290,8 +311,11 @@ final class KeyMonitor {
                     // The fix is on screen and the user chose to send as typed.
                     Log.write("hold released by user: sent as typed")
                     releaseHold(send: true)
+                } else if Self.enterSendsWhileChecking(elapsed: Date().timeIntervalSince(h.started)) {
+                    Log.write("enter sent while checking")
+                    releaseHold(send: true)
                 } else {
-                    // Still checking: extra Enters just wait. Esc cancels.
+                    // A double press right after the first Enter still waits. Esc cancels.
                     Log.write("enter ignored: still checking")
                 }
                 return nil
@@ -315,6 +339,7 @@ final class KeyMonitor {
                 return nil
             }
             if holdOnEnter, llm.isReady {
+                let enterStart = Date()
                 // The buffer forgets text after a mouse click or arrow key; the field itself does not.
                 // Only the line the caret is on: the field can hold a whole document or terminal scrollback.
                 let bufferLine = LLMSuggester.lastLine(of: buffer)
@@ -332,10 +357,20 @@ final class KeyMonitor {
                 }
                 if segment.unicodeScalars.count >= Self.holdMinimumKeys, !llm.isChecked(segment) {
                     hold = Hold(keyCode: keyCode, flags: flags, segment: segment, started: Date())
+                    let fieldRead = Date()
+                    panel.showLoading(near: Caret.anchorPoint())
+                    let bubbleShown = Date()
                     llm.checkNow(buffer)
                     Log.write("hold enter (\(segment.unicodeScalars.count) keys)")
-                    panel.showLoading(near: Caret.anchorPoint())
+                    if Date().timeIntervalSince(enterStart) >= 0.15 {
+                        Log.write(String(format: "enter slow: field %.2fs, bubble %.2fs, request %.2fs",
+                                         fieldRead.timeIntervalSince(enterStart), bubbleShown.timeIntervalSince(fieldRead), Date().timeIntervalSince(bubbleShown)))
+                    }
                     let startedAt = hold!.started
+                    DispatchQueue.main.asyncAfter(deadline: .now() + Self.sendAnywayAfter) { [weak self] in
+                        guard let self = self, let h = self.hold, h.started == startedAt, !h.decided, self.panel.isLoading else { return }
+                        self.panel.showLoading(near: Caret.anchorPoint(), hint: "↩ ส่งเลย · esc")
+                    }
                     DispatchQueue.main.asyncAfter(deadline: .now() + Self.holdTimeout(forKeys: segment.unicodeScalars.count)) { [weak self] in
                         guard let self = self, let h = self.hold, h.started == startedAt, !h.decided else { return }
                         Log.write("hold timeout")
