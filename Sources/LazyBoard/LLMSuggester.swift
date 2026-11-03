@@ -111,7 +111,8 @@ final class LLMSuggester {
     - Keep the meaning, word order, slang, Thai particles (ค่ะ ครับ นะ อะ แงๆ), emoji, punctuation, \
     spacing, line breaks and letter case. Do not rewrite style, do not translate, do not add or remove \
     words, never answer or comment on the message. Thai-spelled English dev words (เทส รีเทส ดีพลอย บัค \
-    เช็ค รัน คอมมิต) are normal and stay as written; never replace them with formal Thai.
+    เช็ค รัน คอมมิต) are normal and stay as written; never replace them with formal Thai. So is chat slang and \
+    its casual spelling (เริ่ด ปัง จึ้ง ฉ่ำ ตึง รอแปป ผิดบาน ป่าว ค้าบ งับ): it is meant, never a typo.
     - Leave real names, product names, code identifiers, URLs and well-known abbreviations as typed, \
     unless the context makes the intended word obvious.
     - "fixed" is your single best full correction of the whole text. The text may be several sentences or \
@@ -270,6 +271,7 @@ final class LLMSuggester {
                     hints[word] = thai
                 }
             } else if KeyMap.isThaiLayoutWord(scalars) {
+                if Detector.commonShortThai.contains(word) || Detector.slangThai.contains(word) { continue }
                 let english = KeyMap.convert(scalars, direction: .thaiToEnglish)
                 guard english.range(of: "^[A-Za-z0-9][A-Za-z0-9'.-]*$", options: .regularExpression) != nil else { continue }
                 let core = english.trimmingCharacters(in: CharacterSet(charactersIn: ".,'-"))
@@ -313,7 +315,7 @@ final class LLMSuggester {
 
     /// An everyday Thai word the same length as `word`, one neighbouring key away from it.
     static func commonNeighbour(of word: String) -> String? {
-        guard !Detector.commonShortThai.contains(word) else { return nil }
+        guard !Detector.commonShortThai.contains(word), !Detector.slangThai.contains(word) else { return nil }
         let scalars = Array(word.unicodeScalars)
         guard scalars.count >= 3 else { return nil }
         for (i, sc) in scalars.enumerated() {
@@ -367,8 +369,12 @@ final class LLMSuggester {
                     } else if !ThaiOrtho.isValid(run.unicodeScalars) || !Detector.isRealThai(run) {
                         let unknown = SuggestionPanel.tokens(run).filter { !Detector.isRealThai($0) }
                         found += (unknown.isEmpty ? [run] : unknown).map { ($0, .thai) }
-                    } else {
-                        found += SuggestionPanel.tokens(run).filter { commonNeighbour(of: $0) != nil }.map { ($0, .nearCommon) }
+                    } else if !Detector.slangThai.contains(run) {
+                        // Word breaking does not know slang (ค้าบ -> ค้า + บ): a piece of a slang word in the run is fine.
+                        let slangHere = Detector.slangThai.filter { run.contains($0) }
+                        found += SuggestionPanel.tokens(run)
+                            .filter { t in commonNeighbour(of: t) != nil && !slangHere.contains { $0.count > t.count && $0.contains(t) } }
+                            .map { ($0, .nearCommon) }
                     }
                 } else if !code {
                     let rest = run.dropFirst()

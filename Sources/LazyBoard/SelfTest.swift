@@ -200,6 +200,15 @@ enum SelfTest {
         for s in ["useState กับ useEffect", "ดูที่ https://example.com/a/b ได้เลย", "/clear แล้วเริ่มใหม่", "deploy v1.2.3 แล้ว"] {
             check("no layout doubt: \(s)", !LLMSuggester.doubts(in: s).contains { $0.why == .layout }, "\(LLMSuggester.doubts(in: s))")
         }
+        expect("ivcxx", "รอแปป", .englishToThai)               // the spell checker passes ivcxx as Roman numerals
+        expect("ok ivcxx ", "รอแปป ", .englishToThai)
+        expect("w,", nil)                                       // two-key slang (ไม) is not forced
+        for s in ["รอแปป รอแพพ", "เริ่ด", "ปังมาก จึ้งมาก ฉ่ำ", "ผิดบาน เลย", "ได้ป่าว ค้าบ", "ทำไง งับ"] {
+            check("slang looks fine: \(s)", LLMSuggester.looksFine(s), "\(LLMSuggester.doubts(in: s))")
+        }
+        var unsafeSlang: [String] = []
+        for w in Detector.slangThai where d.suggest(buffer: w) != nil { unsafeSlang.append(w) }
+        check("no slang word is turned into English", unsafeSlang.isEmpty, unsafeSlang.joined(separator: " "))
         check("reply reads unsure", LLMSuggester.reply(from: ["fixed": "x", "alternatives": [String](), "unsure": true])?.unsure == true)
         check("reply without unsure is sure", LLMSuggester.reply(from: ["fixed": "x"])?.unsure == false)
         let pairs = WordLog.changedPairs(from: "ส่ง PR แล้วนะค่ะ fix the corretion", to: "ส่ง PR แล้วนะคะ fix the correction")

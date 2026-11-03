@@ -67,6 +67,21 @@ final class Detector {
         "แชร์", "โพสต์", "อัปเดต", "ติดตั้ง", "ดาวน์โหลด", "เสีย", "ค้าง", "ช้าลง", "เร็วขึ้น", "ดีขึ้น", "แย่ลง", "มากขึ้น", "น้อยลง", "จริงๆ", "เลยนะ",
     ]
 
+    /// Chat and teen slang, and casual spellings, that the dictionary lacks or a fix would wrongly "correct".
+    /// Treated as everyday words: never doubted, and keys that spell one are Thai (ivcxx = รอแปป).
+    static let slangThai: Set<String> = [
+        "เริ่ด", "ปัง", "ปังมาก", "ปังปุริเย่", "จึ้ง", "จึ้งมาก", "ฉ่ำ", "ตึง", "ตัวตึง", "ตัวแม่", "ตัวมัม", "ตัวพ่อ",
+        "แม่", "มูฟออน", "มู", "สายมู", "ชิว", "ชิล", "ชิลล์", "แซ่บ", "นัว", "ฟิน", "ฟีล", "ฟีลแบบ", "เวิร์ค", "เวิร์ก",
+        "เป๊ะ", "เป๊ะปัง", "คิ้วท์", "คิวท์", "ต๊าช", "ปุยมุ้ย", "เกินปุยมุ้ย", "เกิน", "ล้ำ", "ลั่น", "สับ", "ขิง", "ติ่ง",
+        "ปั่น", "ชง", "ชิป", "นก", "เท", "โป๊ะ", "โป๊ะแตก", "แกง", "โดนแกง", "ตุย", "กาว", "บาน", "ผิดบาน", "บานเลย",
+        "รอแปป", "รอแพพ", "แปป", "แพพ", "แปบ", "แป๊บ", "แป้บ", "รอแป๊บ", "เด๋ว", "เดะ", "เด่ว", "เดี๋ยวก่อน",
+        "ป่าว", "ปล่าว", "ป้ะ", "มะ", "ไม", "งะ", "งับ", "ค้าบ", "คร้าบ", "คับ", "ฮะ", "อ้ะ", "เนอะ", "เนาะ", "เด้อ", "เน้อ",
+        "จ้ะ", "จ้า", "จ๋า", "เหอะ", "เถอะ", "เนี่ย", "ไรเนี่ย", "ไรงี้", "อะไรงี้", "งี้", "ไง", "ทำไง", "เบย", "บ่",
+        "ชิมิ", "ใช่มะ", "จริงดิ", "จริงป่ะ", "ได้ป่าว", "ไหว", "ไม่ไหว", "อีหยัง", "หยัง", "งง", "งือ", "งุงิ", "ฮือ", "แง",
+        "อิอิ", "คิคิ", "คริคริ", "ฮ่า", "อุ๊ย", "ว้าย", "ว้าว", "โอ้โห", "อ่าว", "อ้าว", "เอ้า", "เอ๊ะ", "เห้ย", "เฮ้ย",
+        "กุ", "กู", "มึง", "แก", "ตะเอง", "ตัวเอง", "เค้า", "คือแบบ", "แบบว่า", "จัดไป", "จัดให้", "เบิ้ล", "เพลีย",
+    ]
+
     /// Dev and product words macOS's dictionary does not know; never treated as mistyped Thai.
     static let knownEnglish: Set<String> = [
         "google", "github", "gitlab", "bitbucket", "api", "apis", "backend", "frontend", "fullstack", "devops",
@@ -164,12 +179,18 @@ final class Detector {
         let hasVowel = ThaiOrtho.hasVowelOrTone(thai)
         let englishOK = isEnglishWord(word)
         let lenient = isLast || (scalars.count <= 2 && !englishOK)
-        let isCommon = Self.commonShortThai.contains(thaiString)
+        let isCommon = Self.commonShortThai.contains(thaiString) || Self.slangThai.contains(thaiString)
         // Never turn anything into Thai that is not Thai words: cloudfailre -> แสนีกดฟรสพำ.
         guard isCommon || Self.isRealThai(thaiString) else { return .none }
 
         // Two-key common Thai words whose keys happen to spell a dictionary entry (iv = รอ, mu = ที).
-        if isCommon, scalars.count <= 2, !Self.knownEnglish.contains(word.lowercased()) {
+        // Everyday words only: two-key slang (w, = ไม) is too easy to hit by accident.
+        if Self.commonShortThai.contains(thaiString), scalars.count <= 2, !Self.knownEnglish.contains(word.lowercased()) {
+            return WordVerdict(direction: .englishToThai, confidence: .strong)
+        }
+        // An everyday or slang word of four keys or more, even when the spell checker passes the keys
+        // (ivcxx reads as Roman numerals, but it is รอแปป).
+        if isCommon, scalars.count >= 4, !Self.knownEnglish.contains(word.lowercased()) {
             return WordVerdict(direction: .englishToThai, confidence: .strong)
         }
         if !englishOK && (scalars.count >= 4 || (hasVowel && isCommon)) {
@@ -186,6 +207,8 @@ final class Detector {
     // MARK: Thai layout → English
 
     private func thaiToEnglishVerdict(_ word: String, _ scalars: [Unicode.Scalar], isLast: Bool) -> WordVerdict {
+        // A word we know is Thai stays Thai, whatever its keys spell (รอแปป = ivcxx).
+        if Self.commonShortThai.contains(word) || Self.slangThai.contains(word) { return .none }
         let english = KeyMap.convert(scalars, direction: .thaiToEnglish)
         // Digits typed on the Thai layout: "ๅจ" is 10, "ๅจ.๒" is 10.2 … (two or more keys).
         if scalars.count >= 2, english.range(of: "^[0-9][0-9.,:%/-]*$", options: .regularExpression) != nil {
@@ -275,7 +298,7 @@ final class Detector {
 
     /// libthai's word list (Resources/thai-words.txt) plus the everyday words above. Without the file only those remain.
     static let thaiWords: Set<String> = {
-        var words = commonShortThai
+        var words = commonShortThai.union(slangThai)
         if let url = Bundle.main.url(forResource: "thai-words", withExtension: "txt"),
            let text = try? String(contentsOf: url, encoding: .utf8) {
             words.formUnion(text.split(separator: "\n").map(String.init))
