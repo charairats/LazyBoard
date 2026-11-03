@@ -43,6 +43,8 @@ final class LLMSuggester {
     struct Reply: Equatable {
         let fixed: String
         let alternatives: [String]
+        /// The model is not confident in "fixed", so a stronger one should look again.
+        var unsure = false
         var options: [String] { [fixed] + alternatives.filter { $0 != fixed } }
     }
 
@@ -57,6 +59,10 @@ final class LLMSuggester {
     private var process: Process?
     private var processID: Int = 0
     private let warm = WarmClaude()
+    /// The stronger model in its own process, so the fast one stays warm: it re-checks a message the fast one
+    /// passed although the local check doubted it, and does the after-send check.
+    private let warmStrong = WarmClaude()
+    static let strongModel: Model = .opus
     private var warmRequestID = 0
     /// Segment that arrived while a request was in flight; requested when that one finishes.
     private var queuedSegment: String?
@@ -68,6 +74,10 @@ final class LLMSuggester {
     var onFinished: ((String, Reply) -> Void)?
     /// A request that produced no usable reply (error, timeout, refusal).
     var onFailed: ((String) -> Void)?
+    /// The fast model was unsure about a held segment and the stronger one is now checking it.
+    var onEscalated: ((String) -> Void)?
+    /// Segments checked at Enter: if the fast model is unsure about one, the stronger one gets it.
+    private var escalateIfUnsure = Set<String>()
     /// A request has just been sent for this segment (to show the loading indicator).
     var onStarted: ((String) -> Void)?
     private(set) var inFlightSegment: String?
@@ -110,6 +120,10 @@ final class LLMSuggester {
     versions of the whole text in "alternatives" (each differing from "fixed" only in the ambiguous \
     words). Otherwise, or when the text is longer than about 300 characters, "alternatives" is an empty array.
     - If there is nothing to fix, return the text unchanged with an empty "alternatives".
+    - "unsure" is true only when you are not confident in "fixed": a word looks wrong but you cannot tell what \
+    was meant, or a real word might be a slip for another that fits better (เสลา typed for เวลา). It is false \
+    when the text is clearly fine as typed or your fix is clearly right; slang and casual spelling are not a \
+    reason to be unsure.
     - Each user message is a separate, independent text to fix. Never use earlier messages as context \
     and never refer to them.
     - If the JSON has "emoji": true, append one or two emojis that fit the tone of the message to the very \
@@ -197,6 +211,7 @@ final class LLMSuggester {
             }
             return segment
         }
+        if model != Self.strongModel { escalateIfUnsure.insert(segment) }
         if isBusy {
             if inFlightSegment != segment { queuedSegment = segment }
             return segment
@@ -244,7 +259,8 @@ final class LLMSuggester {
             if scalars.allSatisfy(KeyMap.isMappableASCII) {
                 guard scalars.count >= 3 else { continue }
                 if scalars.allSatisfy({ (0x30...0x39).contains($0.value) }) { continue }
-                guard !d.isEnglishWord(word) else { continue }
+                // Words joined by a slash (in progress/done) are each English, not one garbled word.
+                guard !word.split(separator: "/").allSatisfy({ d.isEnglishWord(String($0)) }) else { continue }
                 let thai = KeyMap.convert(scalars, direction: .englishToThai)
                 let thaiScalars = Array(thai.unicodeScalars)
                 let thaiCount = thaiScalars.filter(KeyMap.isThai).count
@@ -280,6 +296,168 @@ final class LLMSuggester {
         }
         if maxRun >= 4 { return true }
         return scalars.count >= 4 && !ThaiOrtho.hasVowelOrTone(scalars)
+    }
+
+    /// Emoji and polite modes rewrite the message, so Enter always waits for Claude in them.
+    var rewrites: Bool { emojiMode || polite != .off }
+
+    /// Why the local check doubts a word.
+    enum Doubt: String {
+        case english = "english-unknown"
+        case thai = "thai-unknown"
+        case typo = "thai-typo"
+        case layout
+        /// A real but uncommon word one slipped key from an everyday one (เสลา for เวลา).
+        case nearCommon = "near-common"
+    }
+
+    /// An everyday Thai word the same length as `word`, one neighbouring key away from it.
+    static func commonNeighbour(of word: String) -> String? {
+        guard !Detector.commonShortThai.contains(word) else { return nil }
+        let scalars = Array(word.unicodeScalars)
+        guard scalars.count >= 3 else { return nil }
+        for (i, sc) in scalars.enumerated() {
+            for other in KeyMap.thaiNeighbours[sc] ?? [] {
+                var variant = scalars
+                variant[i] = other
+                let candidate = String(String.UnicodeScalarView(variant))
+                if Detector.commonShortThai.contains(candidate) { return candidate }
+            }
+        }
+        return nil
+    }
+
+    /// True when every word is already a real Thai or English word, or a link, number or bit of code.
+    /// Anything in doubt is false, and Claude checks it as before.
+    static func looksFine(_ text: String) -> Bool { doubts(in: text).isEmpty }
+
+    /// The words that do not look right, and why. For a Thai run without spaces, the pieces that are not words.
+    static func doubts(in text: String) -> [(word: String, why: Doubt)] {
+        let d = Detector.shared
+        var found: [(word: String, why: Doubt)] = []
+        for raw in text.split(whereSeparator: { $0 == " " || $0 == "\n" }) {
+            let token = String(raw)
+            if token.contains("://") || token.contains("@") || token.hasPrefix("~") || token.hasPrefix("#") { continue }
+            // File names and identifiers: KeyMonitor.swift, snake_case.
+            if token.range(of: "^[A-Za-z0-9_-]{3,}\\.[a-z]{2,5}$|^[A-Za-z]+_[A-Za-z0-9_]+$", options: .regularExpression) != nil { continue }
+            // Thai typed on the English layout uses the digit and / keys too (gliH0ch]loj8tjt, /yj':hkp = ฝั่งซ้าย),
+            // so those are only code or paths when the keys do not read as Thai.
+            let scalars = Array(token.unicodeScalars)
+            if scalars.count >= 3, scalars.allSatisfy(KeyMap.isMappableASCII), readsAsThai(scalars),
+               !token.split(separator: "/").allSatisfy({ d.isEnglishWord(String($0)) }) {
+                found.append((token, .layout))
+                continue
+            }
+            if token.hasPrefix("/") { continue }
+            if let hint = layoutHints(for: token)[token] {
+                // Real Thai whose keys spell nothing English (แก้ใน -> cdh.o) is just Thai; หแพรยะ -> script is not.
+                let core = hint.trimmingCharacters(in: CharacterSet(charactersIn: ".,'-"))
+                guard token.unicodeScalars.allSatisfy(KeyMap.isThai), Detector.isRealThai(token), !d.isEnglishWord(core),
+                      !(core.count >= 5 && core.allSatisfy(\.isLetter) && Detector.looksEnglish(core)) else {
+                    found.append((token, .layout))
+                    continue
+                }
+            }
+            // Versions and the like: v1.2.3, k8s.
+            let code = token.contains(where: \.isNumber)
+            for run in runs(of: token) {
+                if KeyMap.isThai(run.unicodeScalars.first!) {
+                    if ThaiTypos.fix(run) != nil {
+                        found.append((run, .typo))
+                    } else if !ThaiOrtho.isValid(run.unicodeScalars) || !Detector.isRealThai(run) {
+                        let unknown = SuggestionPanel.tokens(run).filter { !Detector.isRealThai($0) }
+                        found += (unknown.isEmpty ? [run] : unknown).map { ($0, .thai) }
+                    } else {
+                        found += SuggestionPanel.tokens(run).filter { commonNeighbour(of: $0) != nil }.map { ($0, .nearCommon) }
+                    }
+                } else if !code {
+                    let rest = run.dropFirst()
+                    // camelCase, LazyBoard, iPhone and acronyms are names, not misspellings.
+                    if rest.contains(where: \.isUppercase) && (rest.contains(where: \.isLowercase) || run.count <= 6) { continue }
+                    if !d.isEnglishWord(run) { found.append((run, .english)) }
+                }
+            }
+        }
+        return found
+    }
+
+    /// Keys that give mostly Thai letters, with a vowel or tone, on the Thai layout.
+    private static func readsAsThai(_ scalars: [Unicode.Scalar]) -> Bool {
+        let thai = Array(KeyMap.convert(scalars, direction: .englishToThai).unicodeScalars)
+        // A slip or two is fine (แ้ล for แล้ว); camelCase code (useState) breaks Thai spelling all over.
+        return Double(thai.filter(KeyMap.isThai).count) / Double(thai.count) >= 0.8 && ThaiOrtho.hasVowelOrTone(thai)
+            && ThaiOrtho.violations(thai) <= max(1, thai.count / 6)
+    }
+
+    /// After a message went out unchecked, ask the stronger model anyway, only to measure what the local check
+    /// lets through. Nothing is shown. Skipped while it is busy, and on the API backend.
+    func shadowCheck(_ segment: String, completion: @escaping (Reply) -> Void) {
+        guard isReady, backend == .claudeCLI, !warmStrong.isBusy, Date() >= backoffUntil else {
+            Log.write("shadow: skipped")
+            return
+        }
+        warmStrong.send(Self.userMessage(for: segment), model: Self.strongModel) { reply, _ in
+            guard let reply = reply else { Log.write("shadow: no reply"); return }
+            completion(reply)
+        }
+    }
+
+    /// Whether a message the fast model passed can go to the stronger one right now.
+    var canEscalate: Bool { isReady && backend == .claudeCLI && model != Self.strongModel && !warmStrong.isBusy }
+
+    func prewarmStrong() {
+        guard canEscalate else { return }
+        warmStrong.prewarm(model: Self.strongModel)
+    }
+
+    /// Ask the stronger model about a segment the fast one left unchanged. The reply arrives like any other.
+    func escalate(_ segment: String) {
+        warmRequestID += 1
+        let myID = warmRequestID
+        let started = Date()
+        Log.write("llm strong start (\(segment.unicodeScalars.count) keys, \(Self.strongModel.rawValue))")
+        warmStrong.send(Self.userMessage(for: segment, emoji: emojiMode, polite: polite), model: Self.strongModel) { [weak self] reply, error in
+            guard let self = self else { return }
+            guard self.warmRequestID == myID else {
+                Log.write("llm strong reply ignored (cancelled)")
+                return
+            }
+            guard let reply = reply else {
+                Log.write("llm strong error: \((error ?? "error").prefix(200))")
+                self.onFailed?(segment)
+                return
+            }
+            Log.write(String(format: "llm strong reply in %.1fs, changed=%@", Date().timeIntervalSince(started), reply.fixed != segment ? "yes" : "no"))
+            self.cache[segment] = reply
+            if reply.fixed != segment { self.onResult?(segment, reply) }
+            self.onFinished?(segment, reply)
+        }
+    }
+
+    /// The Thai and the English letter runs in one space-separated token ("ส่งPRแล้ว" -> ส่ง, PR, แล้ว).
+    private static func runs(of token: String) -> [String] {
+        var result: [String] = []
+        var current = String.UnicodeScalarView()
+        var currentThai = false
+        func flush() {
+            var run = String(current)
+            while let last = run.last, "'-".contains(last) { run.removeLast() }
+            if !run.isEmpty { result.append(run) }
+            current = String.UnicodeScalarView()
+        }
+        for sc in token.unicodeScalars {
+            let thai = KeyMap.isThai(sc) && !(0x0E50...0x0E59).contains(sc.value) && sc != "ๆ" && sc != "ฯ"
+            let latin = sc.value < 0x80 && (CharacterSet.letters.contains(sc) || (!current.isEmpty && !currentThai && "'-".unicodeScalars.contains(sc)))
+            if (thai || latin), current.isEmpty || thai == currentThai {
+                current.append(sc)
+                currentThai = thai
+            } else {
+                flush()
+                if thai || latin { current.append(sc); currentThai = thai }
+            }
+        }
+        flush()
+        return result
     }
 
     /// The JSON the model receives.
@@ -332,7 +510,17 @@ final class LLMSuggester {
             }
             self.lastError = nil
             self.lastLatency = Date().timeIntervalSince(started)
-            Log.write(String(format: "llm warm reply in %.1fs, changed=%@, alternatives=%d", self.lastLatency, reply.fixed != segment ? "yes" : "no", reply.alternatives.count))
+            Log.write(String(format: "llm warm reply in %.1fs, changed=%@, alternatives=%d, unsure=%@", self.lastLatency,
+                             reply.fixed != segment ? "yes" : "no", reply.alternatives.count, reply.unsure ? "yes" : "no"))
+            if self.escalateIfUnsure.remove(segment) != nil, reply.unsure {
+                if self.canEscalate {
+                    Log.write("cascade: fast model unsure, asking the strong one")
+                    self.onEscalated?(segment)
+                    self.escalate(segment)
+                    return
+                }
+                Log.write("cascade: skipped, strong model busy")
+            }
             self.cache[segment] = reply
             if self.cache.count > 500 { self.cache.removeAll() }
             if reply.fixed != segment { self.onResult?(segment, reply) }
@@ -361,6 +549,7 @@ final class LLMSuggester {
         process = nil
         processID += 1
         warmRequestID += 1 // a warm reply still in flight will be ignored
+        escalateIfUnsure.removeAll()
         inFlightSegment = nil // so the same line asked again is queued, not assumed to be on its way
     }
 
@@ -374,6 +563,7 @@ final class LLMSuggester {
     func shutdown() {
         cancel()
         warm.stop()
+        warmStrong.stop()
     }
 
     /// The whole message: every line, without trailing blanks, at most maxSegmentKeys keystrokes.
@@ -422,8 +612,9 @@ final class LLMSuggester {
                         "properties": [
                             "fixed": ["type": "string"],
                             "alternatives": ["type": "array", "items": ["type": "string"]],
+                            "unsure": ["type": "boolean"],
                         ],
-                        "required": ["fixed", "alternatives"],
+                        "required": ["fixed", "alternatives", "unsure"],
                         "additionalProperties": false,
                     ],
                 ],
@@ -489,7 +680,7 @@ final class LLMSuggester {
 
     // MARK: Claude Code CLI backend
 
-    static let jsonSchema = #"{"type":"object","properties":{"fixed":{"type":"string"},"alternatives":{"type":"array","items":{"type":"string"}}},"required":["fixed","alternatives"],"additionalProperties":false}"#
+    static let jsonSchema = #"{"type":"object","properties":{"fixed":{"type":"string"},"alternatives":{"type":"array","items":{"type":"string"}},"unsure":{"type":"boolean"}},"required":["fixed","alternatives","unsure"],"additionalProperties":false}"#
 
     private func requestViaCLI(_ segment: String) {
         guard let path = Self.claudePath else {
@@ -576,7 +767,7 @@ final class LLMSuggester {
     static func reply(from obj: [String: Any]) -> Reply? {
         guard let fixed = obj["fixed"] as? String else { return nil }
         let alts = (obj["alternatives"] as? [String] ?? []).filter { !$0.isEmpty }
-        return Reply(fixed: fixed, alternatives: Array(alts.prefix(2)))
+        return Reply(fixed: fixed, alternatives: Array(alts.prefix(2)), unsure: obj["unsure"] as? Bool ?? false)
     }
 
     static func parseCLIResult(_ raw: String) -> Reply? {

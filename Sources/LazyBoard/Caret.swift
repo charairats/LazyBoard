@@ -15,6 +15,13 @@ enum Caret {
         return point
     }
 
+    /// The focused text box in Cocoa screen coordinates, when it is box-sized (a chat input, not a whole document).
+    static func focusedFieldFrame() -> NSRect? {
+        guard let element = focusedElement(), isText(element), let f = frame(of: element), onScreen(f),
+              f.height <= 240, f.width >= 120, let primary = NSScreen.screens.first else { return nil }
+        return NSRect(x: f.minX, y: primary.frame.height - f.maxY, width: f.width, height: f.height)
+    }
+
     /// Switch on the accessibility tree of a newly active app, so the first popup there can already find the caret.
     static func prepare(_ app: NSRunningApplication) {
         _ = focusedElement(in: app)

@@ -6,6 +6,10 @@ if CommandLine.arguments.contains("--test") {
 if CommandLine.arguments.contains("--stats") {
     exit(Stats.run())
 }
+if CommandLine.arguments.contains("--forget-words") {
+    print(WordLog.forget() ? "deleted \(WordLog.url.path)" : "nothing kept")
+    exit(0)
+}
 if CommandLine.arguments.contains("--caret") {
     Caret.probe()
     exit(0)

@@ -63,6 +63,29 @@ enum KeyMap {
         return set
     }()
 
+    /// For each Thai character, the Thai characters a finger lands on by slipping: the keys beside it, above
+    /// and below it (rows are staggered), and the same key with or without Shift. ส and ว sit side by side.
+    static let thaiNeighbours: [Unicode.Scalar: Set<Unicode.Scalar>] = {
+        let rows = [("`1234567890-=", "~!@#$%^&*()_+"), ("qwertyuiop[]\\", "QWERTYUIOP{}|"),
+                    ("asdfghjkl;'", "ASDFGHJKL:\""), ("zxcvbnm,./", "ZXCVBNM<>?")]
+        let plain = rows.map { Array($0.0.unicodeScalars) }, shifted = rows.map { Array($0.1.unicodeScalars) }
+        func thai(_ r: Int, _ c: Int) -> [Unicode.Scalar] {
+            guard r >= 0, r < rows.count, c >= 0, c < plain[r].count else { return [] }
+            return [plain[r][c], shifted[r][c]].compactMap { usToThai[$0] }.filter(isThai)
+        }
+        var map: [Unicode.Scalar: Set<Unicode.Scalar>] = [:]
+        for r in 0..<rows.count {
+            for c in 0..<plain[r].count {
+                // Each row sits half a key right of the one above; the number row has one extra key (`) at its left.
+                let up = r == 1 ? [c + 1, c + 2] : [c, c + 1]
+                let down = r == 0 ? [c - 1, c - 2] : [c, c - 1]
+                let near = thai(r, c - 1) + thai(r, c + 1) + up.flatMap { thai(r - 1, $0) } + down.flatMap { thai(r + 1, $0) } + thai(r, c)
+                for ch in thai(r, c) { map[ch, default: []].formUnion(near.filter { $0 != ch }) }
+            }
+        }
+        return map
+    }()
+
     /// A word typed on the Thai layout: Thai script, allowing the layout's own ASCII marks inside.
     static func isThaiLayoutWord(_ scalars: [Unicode.Scalar]) -> Bool {
         guard scalars.contains(where: isThai) else { return false }

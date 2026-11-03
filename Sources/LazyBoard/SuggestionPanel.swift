@@ -1,4 +1,5 @@
 import Cocoa
+import Carbon.HIToolbox
 
 /// A small glass capsule above and to the right of the caret: the correction, a loading indicator, or a check mark.
 /// Uses the system Liquid Glass material on macOS 26 and a vibrancy material before that.
@@ -9,10 +10,21 @@ final class SuggestionPanel {
     private let keys = NSStackView()
     private let stack: NSStackView
     private let dots = LoadingDots()
+    private let glowRing = GlowRing()
     private(set) var isLoading = false
     private var hideWork: DispatchWorkItem?
 
     var isVisible: Bool { panel.isVisible && panel.alphaValue > 0.01 }
+    /// A click on offered fix number `index`.
+    var onPick: ((Int) -> Void)?
+    /// A click on a key badge: the virtual key code it stands for (Tab, Return, Escape).
+    var onKey: ((Int) -> Void)?
+
+    /// Whether a click at this point (global, top-left origin, as event taps report it) lands on the popup.
+    func contains(screenPoint p: CGPoint) -> Bool {
+        guard isVisible, let primary = NSScreen.screens.first else { return false }
+        return panel.frame.contains(NSPoint(x: p.x, y: primary.frame.height - p.y))
+    }
 
     private static let secondaryFont = NSFont.systemFont(ofSize: 13, weight: .regular)
     private static let keyFont = NSFont.systemFont(ofSize: 10, weight: .semibold)
@@ -27,7 +39,7 @@ final class SuggestionPanel {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
-        panel.ignoresMouseEvents = true
+        // Clickable, but never key: the text box keeps the focus.
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
@@ -53,6 +65,9 @@ final class SuggestionPanel {
 
         content.wantsLayer = true
         content.addSubview(stack)
+        glowRing.frame = content.bounds
+        glowRing.autoresizingMask = [.width, .height]
+        content.addSubview(glowRing, positioned: .below, relativeTo: stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
@@ -93,7 +108,7 @@ final class SuggestionPanel {
     // MARK: Modes
 
     func show(text: String, near point: NSPoint) {
-        show(options: [text], selected: 0, hint: "⇥ Tab", near: point)
+        show(options: [text], selected: 0, hint: "⇥ fix", near: point)
     }
 
     /// Candidate corrections; the selected one is what Tab applies next. With `original`, the words that
@@ -104,10 +119,11 @@ final class SuggestionPanel {
         let displays = Self.displayStrings(options: options, original: original)
         for (i, option) in options.enumerated() {
             let isSelected = i == selected
-            let row = NSStackView()
+            let row = ClickStack()
             row.orientation = .horizontal
             row.spacing = 6
             row.alignment = .centerY
+            row.onClick = { [weak self] in self?.onPick?(i) }
             if options.count > 1 {
                 let marker = NSView()
                 marker.wantsLayer = true
@@ -133,8 +149,72 @@ final class SuggestionPanel {
         layoutAndPresent(near: point, maxWidth: 560)
     }
 
+    /// A Claude fix, with the words it changes highlighted. As wide as the text, wrapping past `maxWidth` (or the
+    /// text box, if narrower); lined up with the box's left edge just above it (below when there is no room above),
+    /// or next to the caret when the box cannot be found.
+    func showFix(original: String, options: [String], selected: Int, hint: String, field: NSRect?, near point: NSPoint) {
+        stopLoading()
+        clearRows()
+        setKeys(hint)
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(field?.origin ?? point) }) ?? NSScreen.main
+        var maxWidth = min(Self.maxWidth, max(field?.width ?? Self.maxWidth, 240))
+        if let vf = screen?.visibleFrame { maxWidth = min(maxWidth, vf.width - 16) }
+        keys.layoutSubtreeIfNeeded()
+        let keysWidth = keys.isHidden ? 0 : keys.fittingSize.width + stack.spacing
+        let markerWidth: CGFloat = options.count > 1 ? 11 : 0
+        let textWidth = maxWidth - Self.padding.left - Self.padding.right - keysWidth - markerWidth
+        for (i, option) in options.enumerated() {
+            rows.addArrangedSubview(fixRow(pieces: Self.condensed(Self.changedWords(from: original, to: option)),
+                                           marker: options.count > 1 ? i == selected : nil, width: textWidth,
+                                           onClick: { [weak self] in self?.onPick?(i) }))
+        }
+        rows.layoutSubtreeIfNeeded()
+        let width = min(max(rows.fittingSize.width + Self.padding.left + Self.padding.right + keysWidth, 44), maxWidth)
+        // The stack's fitting size leaves out its top and bottom insets once there are several rows.
+        let height = max(rows.fittingSize.height + Self.padding.top + Self.padding.bottom, 30)
+        var origin = field.map { NSPoint(x: $0.minX, y: $0.maxY + 6) } ?? NSPoint(x: point.x + 4, y: point.y + 4)
+        if let vf = screen?.visibleFrame {
+            if origin.y + height > vf.maxY { origin.y = (field?.minY ?? point.y - 26) - 6 - height }
+            if origin.x + width > vf.maxX { origin.x = vf.maxX - width - 8 }
+            if origin.x < vf.minX { origin.x = vf.minX + 8 }
+        }
+        hideWork?.cancel()
+        present(NSRect(origin: origin, size: NSSize(width: width, height: height)))
+    }
+
+    private static let maxWidth: CGFloat = 560
+
+    /// One offered fix; `marker` (with several to choose from) says whether it is the one Tab applies.
+    private func fixRow(pieces: [Piece], marker selected: Bool?, width: CGFloat, onClick: @escaping () -> Void) -> NSView {
+        let row = ClickStack()
+        row.onClick = onClick
+        row.orientation = .horizontal
+        row.spacing = 6
+        row.alignment = .centerY
+        if let selected = selected {
+            let marker = NSView()
+            marker.wantsLayer = true
+            marker.layer?.cornerRadius = 2.5
+            marker.layer?.backgroundColor = (selected ? NSColor.controlAccentColor : NSColor.quaternaryLabelColor).cgColor
+            marker.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([marker.widthAnchor.constraint(equalToConstant: 5), marker.heightAnchor.constraint(equalToConstant: 5)])
+            row.addArrangedSubview(marker)
+        }
+        let label = NSTextField(labelWithAttributedString: Self.styled(pieces, selected: selected ?? true))
+        label.lineBreakMode = .byWordWrapping
+        label.maximumNumberOfLines = 8
+        label.cell?.wraps = true
+        label.cell?.truncatesLastVisibleLine = true
+        label.preferredMaxLayoutWidth = width
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        row.addArrangedSubview(label)
+        return row
+    }
+
     /// Three small dots bouncing one after another: Claude is checking the text.
-    func showLoading(near point: NSPoint, hint: String = "") {
+    /// With `glow`, the glass lights up: Opus is taking a second, closer look.
+    func showLoading(near point: NSPoint, hint: String = "", glow: Bool = false) {
+        if glow { glowRing.start() } else { glowRing.stop() }
         clearRows()
         rows.addArrangedSubview(dots)
         setKeys(hint)
@@ -211,7 +291,7 @@ final class SuggestionPanel {
                 let shown = pre.unicodeScalars.count > contextKeys ? "…" + String(pre.unicodeScalars.suffix(contextKeys)) : pre
                 pieces.append(Piece(text: shown, emphasised: false))
             }
-            pieces.append(Piece(text: mid.isEmpty ? "(ตัดออก)" : mid, emphasised: true))
+            pieces.append(Piece(text: mid.isEmpty ? "(removed)" : mid, emphasised: true))
             if !suf.isEmpty {
                 let shown = suf.unicodeScalars.count > contextKeys ? String(suf.unicodeScalars.prefix(contextKeys)) + "…" : suf
                 pieces.append(Piece(text: shown, emphasised: false))
@@ -220,10 +300,11 @@ final class SuggestionPanel {
         }
     }
 
-    /// Word-level diff (space-separated chunks): words that are new or changed are emphasised.
+    /// Word-level diff: words that are new or changed are emphasised. Thai has no spaces, so the words
+    /// come from the system's word breaking, which splits Thai too.
     static func changedWords(from original: String, to fixed: String) -> [Piece] {
-        let a = original.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
-        let b = fixed.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+        let a = tokens(original)
+        let b = tokens(fixed)
         // LCS table
         var table = Array(repeating: Array(repeating: 0, count: b.count + 1), count: a.count + 1)
         if !a.isEmpty && !b.isEmpty {
@@ -241,9 +322,8 @@ final class SuggestionPanel {
             else { j += 1 }
         }
         var pieces: [Piece] = []
-        for (idx, word) in b.enumerated() {
-            let text = (idx == 0 ? "" : " ") + word
-            let emphasised = !keep.contains(idx)
+        for (idx, text) in b.enumerated() {
+            let emphasised = !keep.contains(idx) && !text.allSatisfy(\.isWhitespace)
             if let last = pieces.last, last.emphasised == emphasised {
                 pieces[pieces.count - 1] = Piece(text: last.text + text, emphasised: emphasised)
             } else {
@@ -251,6 +331,32 @@ final class SuggestionPanel {
             }
         }
         return pieces
+    }
+
+    /// The text cut into words and the gaps between them; joined back together they give the text.
+    static func tokens(_ text: String) -> [String] {
+        var result: [String] = []
+        var last = text.startIndex
+        text.enumerateSubstrings(in: text.startIndex..<text.endIndex, options: [.byWords, .substringNotRequired]) { _, range, _, _ in
+            if last < range.lowerBound { result.append(String(text[last..<range.lowerBound])) }
+            result.append(String(text[range]))
+            last = range.upperBound
+        }
+        if last < text.endIndex { result.append(String(text[last...])) }
+        return result
+    }
+
+    /// In a long message, unchanged stretches shrink to their ends so every change stays in view.
+    static func condensed(_ pieces: [Piece], keep: Int = 24) -> [Piece] {
+        guard pieces.contains(where: \.emphasised), pieces.reduce(0, { $0 + $1.text.count }) > 200 else { return pieces }
+        return pieces.enumerated().map { i, p in
+            let chars = Array(p.text)
+            guard !p.emphasised, chars.count > keep * 2 + 4 else { return p }
+            let head = String(chars.prefix(keep)), tail = String(chars.suffix(keep))
+            if i == 0 { return Piece(text: "…" + tail, emphasised: false) }
+            if i == pieces.count - 1 { return Piece(text: head + "…", emphasised: false) }
+            return Piece(text: head + " … " + tail, emphasised: false)
+        }
     }
 
     static func styled(_ pieces: [Piece], selected: Bool) -> NSAttributedString {
@@ -273,6 +379,7 @@ final class SuggestionPanel {
 
     private func stopLoading() {
         dots.stop()
+        glowRing.stop()
         isLoading = false
     }
 
@@ -286,24 +393,20 @@ final class SuggestionPanel {
         let parts = hint.split(separator: "·").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         keys.isHidden = parts.isEmpty
         for part in parts {
-            let badge = NSView()
+            let label = NSTextField(labelWithString: part)
+            label.font = Self.keyFont
+            label.textColor = .labelColor
+            let badge = ClickStack(views: [label])
+            badge.edgeInsets = NSEdgeInsets(top: 2, left: 5, bottom: 2, right: 5)
+            badge.setHuggingPriority(.required, for: .horizontal)
             badge.wantsLayer = true
             badge.layer?.cornerRadius = 5
             badge.layer?.cornerCurve = .continuous
             badge.layer?.backgroundColor = NSColor.gray.withAlphaComponent(0.2).cgColor
             badge.layer?.borderWidth = 0.5
             badge.layer?.borderColor = NSColor.gray.withAlphaComponent(0.4).cgColor
-            let label = NSTextField(labelWithString: part)
-            label.font = Self.keyFont
-            label.textColor = .labelColor
-            label.translatesAutoresizingMaskIntoConstraints = false
-            badge.addSubview(label)
-            NSLayoutConstraint.activate([
-                label.leadingAnchor.constraint(equalTo: badge.leadingAnchor, constant: 5),
-                label.trailingAnchor.constraint(equalTo: badge.trailingAnchor, constant: -5),
-                label.topAnchor.constraint(equalTo: badge.topAnchor, constant: 2),
-                label.bottomAnchor.constraint(equalTo: badge.bottomAnchor, constant: -2),
-            ])
+            let code = part.hasPrefix("⇥") ? kVK_Tab : part.hasPrefix("↩") ? kVK_Return : part.hasPrefix("esc") ? kVK_Escape : nil
+            if let code = code { badge.onClick = { [weak self] in self?.onKey?(code) } }
             keys.addArrangedSubview(badge)
         }
     }
@@ -322,7 +425,10 @@ final class SuggestionPanel {
             if origin.x < vf.minX { origin.x = vf.minX + 8 }
             if origin.y + height > vf.maxY { origin.y = point.y - 26 - height }
         }
-        let frame = NSRect(origin: origin, size: NSSize(width: width, height: height))
+        present(NSRect(origin: origin, size: NSSize(width: width, height: height)))
+    }
+
+    private func present(_ frame: NSRect) {
         if panel.isVisible && panel.alphaValue > 0.5 {
             panel.setFrame(frame, display: true)
             return
@@ -335,6 +441,95 @@ final class SuggestionPanel {
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             panel.animator().alphaValue = 1
         }
+    }
+}
+
+/// A row or key badge of the popup that takes clicks itself, rather than the label inside it.
+/// The panel never becomes key, so the first click has to count.
+final class ClickStack: NSStackView {
+    var onClick: (() -> Void)?
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        onClick != nil && frame.contains(point) ? self : super.hitTest(point)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if let onClick = onClick { onClick() } else { super.mouseDown(with: event) }
+    }
+}
+
+/// Opus at work: a colour ring slowly turning around the edge of the glass, and a tint breathing inside it.
+final class GlowRing: NSView {
+    private let tint = CALayer()
+    private let ring = CAGradientLayer()
+    private let ringMask = CAShapeLayer()
+    private static let radius: CGFloat = 16
+    private static let colors: [NSColor] = [.systemPurple, .systemBlue, .systemTeal, .systemPink]
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        tint.backgroundColor = NSColor.systemPurple.withAlphaComponent(0.14).cgColor
+        tint.cornerRadius = Self.radius
+        tint.cornerCurve = .continuous
+        ring.type = .conic
+        ring.startPoint = CGPoint(x: 0.5, y: 0.5)
+        ring.endPoint = CGPoint(x: 0.5, y: 1)
+        ring.colors = Self.turn(0)
+        ringMask.fillColor = nil
+        ringMask.strokeColor = NSColor.black.cgColor
+        ringMask.lineWidth = 2.5
+        ring.mask = ringMask
+        layer?.addSublayer(tint)
+        layer?.addSublayer(ring)
+        isHidden = true
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// The colours shifted round by `step`, closed back to the first so the conic gradient has no seam.
+    private static func turn(_ step: Int) -> [CGColor] {
+        let shifted = (0..<colors.count).map { colors[($0 + step) % colors.count].cgColor }
+        return shifted + [shifted[0]]
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        tint.frame = bounds
+        ring.frame = bounds
+        ringMask.frame = bounds
+        ringMask.path = CGPath(roundedRect: bounds.insetBy(dx: 1.25, dy: 1.25), cornerWidth: Self.radius - 1,
+                               cornerHeight: Self.radius - 1, transform: nil)
+        CATransaction.commit()
+    }
+
+    func start() {
+        guard isHidden else { return }
+        isHidden = false
+        needsLayout = true
+        let spin = CAKeyframeAnimation(keyPath: "colors")
+        spin.values = (0...Self.colors.count).map { Self.turn($0) }
+        spin.duration = 2.4
+        spin.repeatCount = .infinity
+        ring.add(spin, forKey: "spin")
+        let breathe = CABasicAnimation(keyPath: "opacity")
+        breathe.fromValue = 0.35
+        breathe.toValue = 1
+        breathe.duration = 0.9
+        breathe.autoreverses = true
+        breathe.repeatCount = .infinity
+        tint.add(breathe, forKey: "breathe")
+    }
+
+    func stop() {
+        guard !isHidden else { return }
+        isHidden = true
+        ring.removeAllAnimations()
+        tint.removeAllAnimations()
     }
 }
 

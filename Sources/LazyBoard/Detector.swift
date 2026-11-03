@@ -21,6 +21,8 @@ struct Suggestion: Equatable {
     var source: Source = .layout
     /// Other full replacements the user can cycle to with repeated Tab (LLM only).
     var alternatives: [String] = []
+    /// What was typed, for setting a Claude fix against it (LLM only).
+    var original: String? = nil
 }
 
 /// Decides whether the tail of what was typed is Thai typed on the English layout (or vice versa).
@@ -146,7 +148,8 @@ final class Detector {
 
     private func englishToThaiVerdict(_ word: String, _ scalars: [Unicode.Scalar], isLast: Bool) -> WordVerdict {
         if scalars.allSatisfy({ (0x30...0x39).contains($0.value) }) { return .none }
-        if word.contains("://") || word.contains("@") || word.hasPrefix("/") || word.hasPrefix("~") { return .none }
+        // ฝ sits on the / key, so /yj':hkp is ฝั่งซ้าย; only a path with more slashes is surely not Thai.
+        if word.contains("://") || word.contains("@") || (word.hasPrefix("/") && word.dropFirst().contains("/")) || word.hasPrefix("~") { return .none }
 
         let thai = Array(KeyMap.convert(scalars, direction: .englishToThai).unicodeScalars)
         let thaiCount = thai.filter(KeyMap.isThai).count
@@ -209,6 +212,11 @@ final class Detector {
         if englishOK, !thaiHasVowel, core.count >= 2, scalars.contains(where: { KeyMap.shiftLayerThai.contains($0) }) {
             return WordVerdict(direction: .thaiToEnglish, confidence: .strong)
         }
+        // Every key shifted and no Thai reading (์ญฉ = NPC): an acronym typed on the Thai layout.
+        if !thaiValid, (2...6).contains(core.count), core.allSatisfy(\.isUppercase),
+           scalars.allSatisfy({ KeyMap.shiftLayerThai.contains($0) }) {
+            return WordVerdict(direction: .thaiToEnglish, confidence: .strong)
+        }
         if !thaiValid && englishHasVowel && core.count >= 3 {
             return WordVerdict(direction: .thaiToEnglish, confidence: .strong)
         }
@@ -217,6 +225,8 @@ final class Detector {
         if !englishOK, core.count >= 5, Self.looksEnglish(core), thaiWordScore(word) < 0.34 {
             return WordVerdict(direction: .thaiToEnglish, confidence: .strong)
         }
+        // A real Thai word next to a mistyped English one stays Thai: รอ พำรำรไ must not become "iv review".
+        if thaiValid && (Self.commonShortThai.contains(word) || Self.isRealThai(word)) { return .none }
         if englishOK || (!thaiValid && (lenient || englishHasVowel)) {
             return WordVerdict(direction: .thaiToEnglish, confidence: .weak)
         }

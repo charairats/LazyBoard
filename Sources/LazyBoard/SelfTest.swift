@@ -126,7 +126,7 @@ enum SelfTest {
         check("options show only the differing word", multi[0].first(where: \.emphasised)?.text == "ต่อให้" && multi[1].first(where: \.emphasised)?.text == "ต้องให้",
               multi.map { $0.map { ($0.emphasised ? "[" : "") + $0.text + ($0.emphasised ? "]" : "") }.joined() }.joined(separator: " | "))
         let single = SuggestionPanel.changedWords(from: "กำลังทดสอบคียืบอด ต้อให้ suggest", to: "กำลังทดสอบคีย์บอร์ด ต้องให้ suggest")
-        check("changed words emphasised", single.filter(\.emphasised).map(\.text).joined() == "กำลังทดสอบคีย์บอร์ด ต้องให้",
+        check("changed words emphasised", single.filter(\.emphasised).map(\.text).joined() == "คีย์บอร์ดต้อง",
               single.map { ($0.emphasised ? "[" : "") + $0.text + ($0.emphasised ? "]" : "") }.joined())
 
         print("\n== key events after a layout switch ==")
@@ -164,6 +164,61 @@ enum SelfTest {
         print("\n== request JSON ==")
         let slashes = LLMSuggester.userMessage(for: "to do / in progress/done")
         check("slashes reach the model unescaped", slashes.contains("to do / in progress/done") && !slashes.contains("\\/"), slashes)
+
+        print("\n== enter sends at once when every word is real ==")
+        for s in ["ส่ง PR แล้วนะ รอ review ด้วยค่ะ", "วันนี้หนูกำลังทดสอบระบบอยู่ค่ะ", "to do / in progress/done",
+                  "ดูที่ https://example.com/path ได้เลย", "deploy ขึ้น staging แล้ว v1.2.3", "แก้ใน KeyMonitor.swift แล้วนะ",
+                  "เปิด LazyBoard บน iPhone", "ส่งPRแล้ว", "ok 555 👍", "ขอบคุณมากนะคะ"] {
+            check("looks fine: \(s)", LLMSuggester.looksFine(s))
+        }
+        for s in ["fix the corretion please", "ส่งงานแล้วนะค่ะ", "เป้นอะไรมากมั้ย", "กำลังทดสอบคียืบอด", "อัปเดต พำฟกทำ กับ",
+                  "ok mujgdujp;-hv'", "เเล้วเจอกัน"] {
+            check("goes to Claude: \(s)", !LLMSuggester.looksFine(s))
+        }
+
+        print("\n== why Enter waits, and what Claude changed ==")
+        let english = LLMSuggester.doubts(in: "fix the corretion please")
+        check("doubt: unknown English word", english.count == 1 && english[0].word == "corretion" && english[0].why == .english, "\(english)")
+        check("doubt: Thai typo rule", LLMSuggester.doubts(in: "ส่งงานแล้วนะค่ะ").first?.why == .typo)
+        let thaiDoubts = LLMSuggester.doubts(in: "วันนี้กำลังทดสอบคียืบอด")
+        check("doubt: only the unknown Thai pieces", !thaiDoubts.isEmpty && thaiDoubts.allSatisfy { $0.why == .thai && !$0.word.contains("กำลัง") },
+              thaiDoubts.map(\.word).joined(separator: "|"))
+        check("doubt: wrong layout", LLMSuggester.doubts(in: "อัปเดต พำฟกทำ กับ").first?.why == .layout)
+        check("ส sits next to ว", KeyMap.thaiNeighbours["ส"]?.contains("ว") == true)
+        check("เสลา is one key from เวลา", LLMSuggester.commonNeighbour(of: "เสลา") == "เวลา")
+        let slip = LLMSuggester.doubts(in: "ขอความแม่นเพิ่ม แลกกับเสลานิดหน่อยเราว่าคุ้มนะ")
+        check("doubt: real word one key from a common one", slip.contains { $0.word == "เสลา" && $0.why == .nearCommon }, "\(slip)")
+        check("common words are not near-common", LLMSuggester.commonNeighbour(of: "เวลา") == nil)
+        // Found while testing in chat on 2026-11-03.
+        let review = d.suggest(buffer: "ส่ง PR แล้วนะ รอ พำรำรไ ")
+        check("รอ stays Thai beside a mistyped English word", review?.replacement == "reieiw " && review?.scalarCount == 7,
+              "got \(review.map { "\"\($0.replacement)\" (-\($0.scalarCount))" } ?? "nil")")
+        expect("/yj':hkp", "ฝั่งซ้าย", .englishToThai)
+        expect("์ญฉ", "NPC", .thaiToEnglish)
+        check("doubt: Thai keys with digits are not code", LLMSuggester.doubts(in: "gliH0ch]loj8tjt").first?.why == .layout)
+        check("doubt: Thai keys starting with /", LLMSuggester.doubts(in: "/yj':hkp ฝั่งขวาตัวเราค่ะ").first?.why == .layout)
+        for s in ["useState กับ useEffect", "ดูที่ https://example.com/a/b ได้เลย", "/clear แล้วเริ่มใหม่", "deploy v1.2.3 แล้ว"] {
+            check("no layout doubt: \(s)", !LLMSuggester.doubts(in: s).contains { $0.why == .layout }, "\(LLMSuggester.doubts(in: s))")
+        }
+        check("reply reads unsure", LLMSuggester.reply(from: ["fixed": "x", "alternatives": [String](), "unsure": true])?.unsure == true)
+        check("reply without unsure is sure", LLMSuggester.reply(from: ["fixed": "x"])?.unsure == false)
+        let pairs = WordLog.changedPairs(from: "ส่ง PR แล้วนะค่ะ fix the corretion", to: "ส่ง PR แล้วนะคะ fix the correction")
+        check("changed pairs", pairs.count == 2 && pairs[1] == WordLog.Pair(from: "corretion", to: "correction"), "\(pairs)")
+        check("shape: thai-mark", WordLog.shape(pairs[0]) == "thai-mark", WordLog.shape(pairs[0]))
+        check("shape: spelling", WordLog.shape(pairs[1]) == "spelling")
+        check("shape: layout", WordLog.shape(WordLog.Pair(from: "w,jwfh", to: "ไม่ได้")) == "layout")
+        check("shape: spacing", WordLog.shape(WordLog.Pair(from: "ok,", to: "ok")) == "spacing")
+        check("no pairs when nothing changed", WordLog.changedPairs(from: "เหมือนเดิม ok", to: "เหมือนเดิม ok").isEmpty)
+
+        print("\n== fix set against what was typed ==")
+        check("tokens join back to the text", SuggestionPanel.tokens("ส่งงานแล้วนะ ต่อให้ suggest!").joined() == "ส่งงานแล้วนะ ต่อให้ suggest!")
+        let thaiDiff = SuggestionPanel.changedWords(from: "วันนี้หนูกำลังทดสอบคียืบอดอยู่ค่ะ", to: "วันนี้หนูกำลังทดสอบคีย์บอร์ดอยู่ค่ะ")
+        check("only the changed Thai word is emphasised", !thaiDiff.first!.emphasised && thaiDiff.filter(\.emphasised).map(\.text).joined().hasPrefix("คีย์"),
+              thaiDiff.map { ($0.emphasised ? "[" : "") + $0.text + ($0.emphasised ? "]" : "") }.joined())
+        let long = String(repeating: "ข้อความยาวมาก ", count: 30)
+        let squeezed = SuggestionPanel.condensed(SuggestionPanel.changedWords(from: long + "ต่อให้", to: long + "ต้องให้"))
+        check("long unchanged text is shortened", squeezed.reduce(0) { $0 + $1.text.count } < 80 && squeezed.contains { $0.emphasised && $0.text.hasPrefix("ต้อง") },
+              squeezed.map(\.text).joined())
 
         print("\n== typing test scoring ==")
         check("identical = 100%", TypingTest.accuracy(typed: "สวัสดีค่ะ", target: "สวัสดีค่ะ") == 1)

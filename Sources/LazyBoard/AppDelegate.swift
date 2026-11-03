@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let switchItem = NSMenuItem(title: "สลับคีย์บอร์ดให้หลังแก้", action: #selector(toggleSwitch), keyEquivalent: "")
     private let autoFixItem = NSMenuItem(title: "แก้พิมพ์ค้างคีย์บอร์ดให้เองตอนเคาะ space/Enter (Esc ย้อนกลับ)", action: #selector(toggleAutoFix), keyEquivalent: "")
     private let holdItem = NSMenuItem(title: "อม Enter ไว้ให้ Claude ตรวจก่อนส่ง (Ctrl+Enter = ส่งเลย)", action: #selector(toggleHold), keyEquivalent: "")
+    private let enterChecksItem = NSMenuItem(title: "ใช้ Enter ตรวจก่อนส่งแทน (แบบเดิม)", action: #selector(toggleEnterChecks), keyEquivalent: "")
     private let emojiItem = NSMenuItem(title: "โหมดอีโมจิ: เติมท้ายข้อความ 1–2 ตัวตอนส่ง", action: #selector(toggleEmoji), keyEquivalent: "")
     private let politeItem = NSMenuItem(title: "โหมดสุภาพ (สื่อสารในที่ทำงาน)", action: nil, keyEquivalent: "")
     private let politeMenu = NSMenu()
@@ -28,8 +29,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         migrateOldSettings()
+        WordLog.purge()
         defaults.register(defaults: ["enabled": true, "switchLayout": true, "excluded": [String](),
-                                     "autoFix": true, "holdOnEnter": true, "checkWhileTyping": false, "emojiMode": false,
+                                     "autoFix": true, "holdOnEnter": true, "enterChecks": false, "checkWhileTyping": false, "emojiMode": false,
                                      "llmEnabled": true, "llmModel": LLMSuggester.Model.haiku.rawValue,
                                      "llmBackend": LLMSuggester.Backend.claudeCLI.rawValue])
         monitor.llm.backend = LLMSuggester.Backend(rawValue: defaults.string(forKey: "llmBackend") ?? "") ?? .claudeCLI
@@ -37,6 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         monitor.switchLayoutAfterFix = defaults.bool(forKey: "switchLayout")
         monitor.autoFixLayout = defaults.bool(forKey: "autoFix")
         monitor.holdOnEnter = defaults.bool(forKey: "holdOnEnter")
+        monitor.enterChecks = defaults.bool(forKey: "enterChecks")
         monitor.checkWhileTyping = defaults.bool(forKey: "checkWhileTyping")
         monitor.llm.emojiMode = defaults.bool(forKey: "emojiMode")
         monitor.llm.polite = LLMSuggester.Polite(rawValue: defaults.string(forKey: "politeMode") ?? "") ?? .off
@@ -95,7 +98,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // Everyday switches only; everything else lives under "ตั้งค่าเพิ่มเติม".
         enabledItem.title = "เปิดใช้งาน"
-        holdItem.title = "ตรวจด้วย Claude ก่อนส่ง (Ctrl+Enter ข้าม)"
         emojiItem.title = "เติมอีโมจิท้ายข้อความ"
         for polite in LLMSuggester.Polite.allCases {
             let item = NSMenuItem(title: polite.title, action: #selector(selectPolite(_:)), keyEquivalent: "")
@@ -115,7 +117,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         autoFixItem.title = "แก้พิมพ์ค้างคีย์บอร์ดให้เองตอนเคาะ space/Enter"
         quietItem.title = "ให้ Claude ตรวจเงียบๆ ระหว่างหยุดพิมพ์ด้วย"
         llmItem.title = "ใช้ Claude แก้คำผิด"
-        for item in [switchItem, autoFixItem, quietItem, llmItem, loginItem] {
+        for item in [enterChecksItem, switchItem, autoFixItem, quietItem, llmItem, loginItem] {
             item.target = self
             advanced.addItem(item)
         }
@@ -189,6 +191,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         switchItem.state = monitor.switchLayoutAfterFix ? .on : .off
         autoFixItem.state = monitor.autoFixLayout ? .on : .off
         holdItem.state = monitor.holdOnEnter ? .on : .off
+        holdItem.title = monitor.enterChecks ? "ตรวจด้วย Claude ก่อนส่ง (Ctrl+Enter ข้าม)" : "Ctrl+Enter ให้ Claude ตรวจก่อนส่ง"
+        enterChecksItem.state = monitor.enterChecks ? .on : .off
         quietItem.state = monitor.checkWhileTyping ? .on : .off
         emojiItem.state = monitor.llm.emojiMode ? .on : .off
         politeItem.state = monitor.llm.polite != .off ? .on : .off
@@ -285,6 +289,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggleQuiet() {
         monitor.checkWhileTyping.toggle()
         defaults.set(monitor.checkWhileTyping, forKey: "checkWhileTyping")
+        refreshMenuState()
+    }
+
+    @objc private func toggleEnterChecks() {
+        monitor.enterChecks.toggle()
+        defaults.set(monitor.enterChecks, forKey: "enterChecks")
         refreshMenuState()
     }
 

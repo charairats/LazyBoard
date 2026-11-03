@@ -19,6 +19,7 @@ final class KeyMonitor {
 
     /// After an LLM fix with alternatives is applied, repeated Tab swaps the inserted text for the next option.
     private struct Cycle {
+        var original: String?
         var options: [String]
         var index: Int
         var insertedScalars: Int
@@ -47,15 +48,22 @@ final class KeyMonitor {
 
     /// Hold back Enter until Claude has checked the last sentence; then send, or offer the fix first.
     var holdOnEnter = true
+    /// Which key asks for the check: off, Enter sends as typed and Ctrl+Enter checks first;
+    /// on, Enter checks first (only when a word looks off) and Ctrl+Enter sends as typed.
+    var enterChecks = false
     /// Also ask Claude quietly whenever typing pauses (off: the whole sentence is checked only at Enter).
     var checkWhileTyping = false
     private struct Hold {
         let keyCode: Int
         let flags: CGEventFlags
         let segment: String
-        let started: Date
+        var started: Date
         var decided = false
         var decidedAt: Date?
+        /// What the local check doubted, to compare with what Claude did.
+        var doubts: [(word: String, why: LLMSuggester.Doubt)] = []
+        /// The fast model found nothing and the stronger one is checking.
+        var escalated = false
     }
     /// Enter pressed right as the fix appears was meant for the waiting state, not for "send as typed".
     private static let decisionGrace: TimeInterval = 1.5
@@ -63,6 +71,8 @@ final class KeyMonitor {
     /// Claude usually answers in about 4 seconds but can take 13: past this the writer may send without waiting.
     private static let sendAnywayAfter: TimeInterval = 3
     static func enterSendsWhileChecking(elapsed: TimeInterval) -> Bool { elapsed >= sendAnywayAfter }
+    /// Opus usually answers in 5 to 15 seconds.
+    private static let strongHintAfter: TimeInterval = 10
     private var lastTabFix = Date.distantPast
     /// A second Tab this soon after a fix is a bounce or a double press, not a choice to swap it for another option.
     private static let tabSettle: TimeInterval = 0.5
@@ -70,8 +80,8 @@ final class KeyMonitor {
     static func tabIsAccidental(sinceFix: TimeInterval, repeated: Bool) -> Bool {
         sinceFix < tabSettle || (repeated && sinceFix < cycleWindow)
     }
-    /// A long message takes longer to come back in full.
-    private static func holdTimeout(forKeys keys: Int) -> TimeInterval { 10 + Double(keys) / 50 }
+    /// A long message takes longer to come back in full, and Opus takes up to 15 seconds where Haiku takes 5.
+    private static func holdTimeout(forKeys keys: Int, strong: Bool) -> TimeInterval { (strong ? 30 : 10) + Double(keys) / 50 }
     /// Same floor as LLMSuggester.checkNow: a shorter line is never checked, so holding it would only wait for the timeout.
     private static let holdMinimumKeys = 6
 
@@ -100,6 +110,8 @@ final class KeyMonitor {
         llm.onFinished = { [weak self] original, reply in
             guard let self = self else { return }
             if let h = self.hold, h.segment == original {
+                if h.escalated { Log.write(reply.fixed == original ? "cascade: strong agrees" : "cascade: strong fixed it") }
+                self.recordCheck(h, reply)
                 if reply.fixed == original {
                     Log.write("hold released: nothing to fix")
                     self.releaseHold(send: true, showCheck: true)
@@ -108,12 +120,108 @@ final class KeyMonitor {
             }
             if reply.fixed == original, self.panel.isLoading { self.panel.hide() }
         }
+        panel.onPick = { [weak self] index in self?.pick(index) }
+        // A key badge clicked works as that key pressed: the event goes through this tap like a real one.
+        panel.onKey = { code in
+            let source = CGEventSource(stateID: .combinedSessionState)
+            for down in [true, false] {
+                guard let e = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(code), keyDown: down) else { continue }
+                e.flags = []
+                e.post(tap: .cghidEventTap)
+            }
+        }
+        llm.onEscalated = { [weak self] original in
+            guard let self = self, let h = self.hold, h.segment == original else { return }
+            self.escalated(h)
+        }
         llm.onFailed = { [weak self] original in
             guard let self = self, let h = self.hold, h.segment == original else { return }
             Log.write("hold: check failed")
             self.llm.markChecked(original)
             self.hold = nil
-            self.panel.show(options: ["ตรวจไม่สำเร็จ"], selected: 0, hint: "↩ ส่ง", near: Caret.anchorPoint())
+            self.panel.show(options: ["Couldn't check"], selected: 0, hint: "↩ send", near: Caret.anchorPoint())
+        }
+    }
+
+    /// Tab, or a click on the fix: put it in the text. A held message then waits for Enter.
+    private func accept(_ s: Suggestion) {
+        lastTabFix = Date()
+        guard let h = hold else { apply(s); return }
+        // Fix the text in place; the user sends with Enter when they are happy with it.
+        apply(s)
+        hold = nil
+        llm.markChecked(LLMSuggester.segment(of: buffer))
+        Log.write(String(format: "hold: fix applied after %.1fs, waiting for Enter", Self.sinceDecided(h)))
+        guard cycle == nil else { return }
+        panel.show(options: ["Fixed"], selected: 0, hint: "↩ send", near: Caret.anchorPoint())
+        let shownBuffer = buffer
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+            guard let self = self, self.buffer == shownBuffer, self.suggestion == nil, self.cycle == nil else { return }
+            self.panel.hide()
+        }
+    }
+
+    /// A click on one of the offered fixes: that one goes in, the others stay a Tab away.
+    private func pick(_ index: Int) {
+        guard let s = suggestion else { return }
+        var options = [s.replacement] + s.alternatives
+        guard options.indices.contains(index) else { return }
+        let chosen = options.remove(at: index)
+        Log.write("fix clicked (option \(index + 1))")
+        accept(Suggestion(scalarCount: s.scalarCount, replacement: chosen, direction: s.direction, source: s.source,
+                          alternatives: options, original: s.original))
+    }
+
+    /// After a few seconds the writer may send without waiting; much later the check is given up.
+    private func scheduleHoldTimers() {
+        guard let h = hold else { return }
+        let startedAt = h.started
+        // Enter sends after 3 seconds either way; while Opus is checking, the hint waits longer so the fix,
+        // not the hint, is usually what appears first.
+        DispatchQueue.main.asyncAfter(deadline: .now() + (h.escalated ? Self.strongHintAfter : Self.sendAnywayAfter)) { [weak self] in
+            guard let self = self, let h = self.hold, h.started == startedAt, !h.decided, self.panel.isLoading else { return }
+            self.panel.showLoading(near: Caret.anchorPoint(), hint: "↩ send now · esc", glow: h.escalated)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.holdTimeout(forKeys: h.segment.unicodeScalars.count, strong: h.escalated)) { [weak self] in
+            guard let self = self, let h = self.hold, h.started == startedAt, !h.decided else { return }
+            Log.write("hold timeout")
+            self.llm.markChecked(h.segment)
+            self.hold = nil
+            self.panel.show(options: ["No answer in time"], selected: 0, hint: "↩ send", near: Caret.anchorPoint())
+        }
+    }
+
+    /// The fast model was unsure: keep holding, glowing, while the stronger one has its turn. The timers start over.
+    private func escalated(_ h: Hold) {
+        var next = h
+        next.escalated = true
+        next.started = Date()
+        hold = next
+        panel.showLoading(near: Caret.anchorPoint(), glow: true)
+        scheduleHoldTimers()
+    }
+
+    /// Seconds the fix has been on screen.
+    private static func sinceDecided(_ h: Hold) -> TimeInterval { Date().timeIntervalSince(h.decidedAt ?? Date()) }
+
+    /// What Claude made of a held message: the shape of its fix for the log, and the words for tuning.
+    private func recordCheck(_ h: Hold, _ reply: LLMSuggester.Reply) {
+        let pairs = WordLog.changedPairs(from: h.segment, to: reply.fixed)
+        if !pairs.isEmpty { Log.write("fix shape: \(pairs.count) changes (\(WordLog.shapes(pairs)))") }
+        guard !llm.rewrites else { return }
+        for p in pairs { WordLog.write(.fixed, why: WordLog.shape(p), from: p.from, to: p.to) }
+        for d in h.doubts where !pairs.contains(where: { $0.from.contains(d.word) }) {
+            WordLog.write(.kept, why: d.why.rawValue, from: d.word)
+        }
+    }
+
+    /// Sent unchecked: ask Claude anyway, after the fact, to count what the local check lets through.
+    private func shadowCheck(_ segment: String) {
+        llm.shadowCheck(segment) { reply in
+            let pairs = WordLog.changedPairs(from: segment, to: reply.fixed)
+            guard !pairs.isEmpty else { Log.write("shadow: claude agrees"); return }
+            Log.write("shadow: claude would change \(pairs.count) (\(WordLog.shapes(pairs)))")
+            for p in pairs { WordLog.write(.missed, why: WordLog.shape(p), from: p.from, to: p.to) }
         }
     }
 
@@ -203,17 +311,30 @@ final class KeyMonitor {
             return passThrough
         }
         if event.getIntegerValueField(.eventSourceUserData) == Self.magicTag { return passThrough }
+        // A click on the popup is a choice made in it, not the writer leaving the text.
+        if type != .keyDown, panel.contains(screenPoint: event.location) { return passThrough }
         guard type == .keyDown else { reset(); return passThrough }
         guard isEnabled else { return passThrough }
         if let id = frontBundleID, excludedBundleIDs.contains(id) { return passThrough }
 
         let keyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
-        let flags = event.flags
-        let modified = flags.contains(.maskCommand) || flags.contains(.maskControl) || flags.contains(.maskAlternate)
+        var flags = event.flags
+        var modified = flags.contains(.maskCommand) || flags.contains(.maskControl) || flags.contains(.maskAlternate)
+        /// This Enter asks Claude to check the message before it goes.
+        var review = false
 
         if keyCode == kVK_Return || keyCode == kVK_ANSI_KeypadEnter {
-            // Ctrl+Enter: send exactly what was typed, no check, no fix (passwords, links, code).
-            if flags.contains(.maskControl) && !flags.contains(.maskCommand) && !flags.contains(.maskAlternate) {
+            let ctrlOnly = flags.contains(.maskControl) && !flags.contains(.maskCommand) && !flags.contains(.maskAlternate)
+            if ctrlOnly && !enterChecks {
+                // Ctrl+Enter asks for the check; what goes out in the end is a plain Enter.
+                flags.remove(.maskControl)
+                modified = false
+                review = true
+            } else if !modified && !flags.contains(.maskShift) {
+                review = enterChecks
+            }
+            // With Enter checking, Ctrl+Enter sends exactly what was typed, no check, no fix (passwords, links, code).
+            if ctrlOnly && enterChecks {
                 Log.write("enter sent: ctrl bypass")
                 hold = nil
                 suggestion = nil
@@ -266,24 +387,7 @@ final class KeyMonitor {
         switch keyCode {
         case kVK_Tab:
             if let s = suggestion, !flags.contains(.maskShift) {
-                lastTabFix = Date()
-                if hold != nil {
-                    // Fix the text in place; the user sends with Enter when they are happy with it.
-                    apply(s)
-                    hold = nil
-                    llm.markChecked(LLMSuggester.segment(of: buffer))
-                    Log.write("hold: fix applied, waiting for Enter")
-                    if cycle == nil {
-                        panel.show(options: ["แก้แล้ว"], selected: 0, hint: "↩ ส่ง", near: Caret.anchorPoint())
-                        let shownBuffer = buffer
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
-                            guard let self = self, self.buffer == shownBuffer, self.suggestion == nil, self.cycle == nil else { return }
-                            self.panel.hide()
-                        }
-                    }
-                    return nil
-                }
-                apply(s)
+                accept(s)
                 return nil // swallow the Tab
             }
             if hold != nil { return nil }
@@ -309,7 +413,7 @@ final class KeyMonitor {
                         return nil
                     }
                     // The fix is on screen and the user chose to send as typed.
-                    Log.write("hold released by user: sent as typed")
+                    Log.write(String(format: "hold released by user: sent as typed after %.1fs", Self.sinceDecided(h)))
                     releaseHold(send: true)
                 } else if Self.enterSendsWhileChecking(elapsed: Date().timeIntervalSince(h.started)) {
                     Log.write("enter sent while checking")
@@ -334,11 +438,10 @@ final class KeyMonitor {
             if let s = suggestion, s.source == .llm, holdOnEnter {
                 hold = Hold(keyCode: keyCode, flags: flags, segment: LLMSuggester.segment(of: buffer), started: Date(), decided: true, decidedAt: Date())
                 Log.write("enter held: a fix is showing")
-                panel.show(options: [s.replacement.trimmingCharacters(in: .whitespaces)], selected: 0,
-                           hint: "⇥ แก้ · ↩ ส่งตามเดิม · esc", near: Caret.anchorPoint())
+                showFix(original: s.original, options: [s.replacement], selected: 0, hint: "⇥ fix · ↩ send as is · esc")
                 return nil
             }
-            if holdOnEnter, llm.isReady {
+            if holdOnEnter, llm.isReady, review || llm.rewrites {
                 let enterStart = Date()
                 // The buffer forgets text after a mouse click or arrow key; the field itself does not.
                 // Only the line the caret is on: the field can hold a whole document or terminal scrollback.
@@ -350,13 +453,35 @@ final class KeyMonitor {
                     }
                 }
                 let segment = LLMSuggester.segment(of: buffer)
+                var mustCheck = false
+                var doubts: [(word: String, why: LLMSuggester.Doubt)] = []
                 if segment.unicodeScalars.count < Self.holdMinimumKeys {
                     Log.write("enter sent: too short (\(segment.unicodeScalars.count) keys)")
                 } else if llm.isChecked(segment) {
                     Log.write("enter sent: already checked")
+                } else if llm.rewrites {
+                    Log.write("hold why: mode")
+                    mustCheck = true
+                } else {
+                    doubts = LLMSuggester.doubts(in: segment)
+                    if !enterChecks {
+                        // Ctrl+Enter: the writer asked, so Claude checks whatever the local check thinks.
+                        Log.write("hold why: asked" + (doubts.isEmpty ? "" : ", \(doubts.count) doubted"))
+                        mustCheck = true
+                    } else if doubts.isEmpty {
+                        // Every word is real: send at once, with no dots and no check mark.
+                        Log.write("enter sent: looks fine (\(segment.unicodeScalars.count) keys)")
+                        shadowCheck(segment)
+                    } else {
+                        var counts: [String: Int] = [:]
+                        for d in doubts { counts[d.why.rawValue, default: 0] += 1 }
+                        Log.write("hold why: " + counts.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: ", "))
+                        mustCheck = true
+                    }
                 }
-                if segment.unicodeScalars.count >= Self.holdMinimumKeys, !llm.isChecked(segment) {
-                    hold = Hold(keyCode: keyCode, flags: flags, segment: segment, started: Date())
+                if mustCheck {
+                    hold = Hold(keyCode: keyCode, flags: flags, segment: segment, started: Date(), doubts: doubts)
+                    llm.prewarmStrong()
                     let fieldRead = Date()
                     panel.showLoading(near: Caret.anchorPoint())
                     let bubbleShown = Date()
@@ -366,23 +491,20 @@ final class KeyMonitor {
                         Log.write(String(format: "enter slow: field %.2fs, bubble %.2fs, request %.2fs",
                                          fieldRead.timeIntervalSince(enterStart), bubbleShown.timeIntervalSince(fieldRead), Date().timeIntervalSince(bubbleShown)))
                     }
-                    let startedAt = hold!.started
-                    DispatchQueue.main.asyncAfter(deadline: .now() + Self.sendAnywayAfter) { [weak self] in
-                        guard let self = self, let h = self.hold, h.started == startedAt, !h.decided, self.panel.isLoading else { return }
-                        self.panel.showLoading(near: Caret.anchorPoint(), hint: "↩ ส่งเลย · esc")
-                    }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + Self.holdTimeout(forKeys: segment.unicodeScalars.count)) { [weak self] in
-                        guard let self = self, let h = self.hold, h.started == startedAt, !h.decided else { return }
-                        Log.write("hold timeout")
-                        self.llm.markChecked(h.segment)
-                        self.hold = nil
-                        self.panel.show(options: ["ตรวจไม่ทัน"], selected: 0, hint: "↩ ส่ง", near: Caret.anchorPoint())
-                    }
+                    scheduleHoldTimers()
                     return nil
                 }
             }
             if !holdOnEnter { Log.write("enter sent: hold off") }
             else if !llm.isReady { Log.write("enter sent: llm not ready") }
+            else if !review {
+                // Plain Enter: out it goes. Opus reads it afterwards, to count how often Ctrl+Enter would have helped.
+                let segment = LLMSuggester.segment(of: buffer)
+                if segment.unicodeScalars.count >= Self.holdMinimumKeys {
+                    Log.write("enter sent: plain (\(segment.unicodeScalars.count) keys, \(LLMSuggester.doubts(in: segment).count) doubted)")
+                    shadowCheck(segment)
+                }
+            }
             if fixedFirst {
                 // Deliver the Enter after the replacement, in order.
                 let source = CGEventSource(stateID: .combinedSessionState)
@@ -394,8 +516,8 @@ final class KeyMonitor {
             return passThrough
 
         case kVK_Escape:
-            if hold != nil {
-                Log.write("hold cancelled by user")
+            if let h = hold {
+                Log.write(h.decided ? String(format: "hold cancelled by user after %.1fs", Self.sinceDecided(h)) : "hold cancelled by user")
                 hold = nil
                 suggestion = nil
                 panel.hide()
@@ -558,19 +680,30 @@ final class KeyMonitor {
         let options = reply.options.map { $0 + trailing }
         let s = Suggestion(scalarCount: orig.count + trailing.unicodeScalars.count,
                            replacement: options[0], direction: nil, source: .llm,
-                           alternatives: Array(options.dropFirst()))
+                           alternatives: Array(options.dropFirst()), original: original)
         suggestion = s
         Log.write("llm suggestion (\(s.scalarCount) keys, \(options.count) options)")
         if hold != nil, hold!.segment == original {
             hold!.decided = true
             hold!.decidedAt = Date()
-            panel.show(options: reply.options, selected: 0,
-                       hint: options.count > 1 ? "⇥ แก้ · ⇥⇥ สลับ · ↩ ส่งตามเดิม" : "⇥ แก้ · ↩ ส่งตามเดิม · esc",
-                       near: Caret.anchorPoint(), original: original)
+            showFix(original: original, options: reply.options, selected: 0,
+                    hint: options.count > 1 ? "⇥ fix · ⇥⇥ next · ↩ send as is" : "⇥ fix · ↩ send as is · esc")
             return
         }
-        panel.show(options: reply.options, selected: 0,
-                   hint: options.count > 1 ? "⇥ แก้ · ⇥⇥ สลับ" : "⇥ แก้", near: Caret.anchorPoint(), original: original)
+        showFix(original: original, options: reply.options, selected: 0, hint: options.count > 1 ? "⇥ fix · ⇥⇥ next" : "⇥ fix")
+    }
+
+    /// Claude's fix, set against the text box; a plain list when what was typed is not known.
+    private func showFix(original: String?, options: [String], selected: Int, hint: String) {
+        let trimmed = options.map { $0.trimmingCharacters(in: .whitespaces) }
+        guard let original = original else {
+            panel.show(options: trimmed, selected: selected, hint: hint, near: Caret.anchorPoint())
+            return
+        }
+        let field = Caret.focusedFieldFrame()
+        Log.write("fix shown at \(field == nil ? "caret" : "field")")
+        panel.showFix(original: original, options: trimmed, selected: selected, hint: hint,
+                          field: field, near: Caret.anchorPoint())
     }
 
     private func cycleNext() {
@@ -588,8 +721,7 @@ final class KeyMonitor {
         cycle = c
         llm.markChecked(LLMSuggester.segment(of: buffer))
         Log.write("llm cycle -> option \(next + 1)")
-        panel.show(options: c.options.map { $0.trimmingCharacters(in: .whitespaces) }, selected: next,
-                   hint: "⇥ สลับ · ↩ ส่ง", near: Caret.anchorPoint())
+        showFix(original: c.original, options: c.options, selected: next, hint: "⇥ next · ↩ send")
         scheduleCycleExpiry()
     }
 
@@ -626,10 +758,9 @@ final class KeyMonitor {
         }
         if s.source == .llm, !s.alternatives.isEmpty {
             let options = [s.replacement] + s.alternatives
-            cycle = Cycle(options: options, index: 0, insertedScalars: s.replacement.unicodeScalars.count,
+            cycle = Cycle(original: s.original, options: options, index: 0, insertedScalars: s.replacement.unicodeScalars.count,
                           expires: Date().addingTimeInterval(Self.cycleWindow))
-            panel.show(options: options.map { $0.trimmingCharacters(in: .whitespaces) }, selected: 0,
-                       hint: "⇥ สลับ · ↩ ส่ง", near: Caret.anchorPoint())
+            showFix(original: s.original, options: options, selected: 0, hint: "⇥ next · ↩ send")
             scheduleCycleExpiry()
         }
         onFix?(s)

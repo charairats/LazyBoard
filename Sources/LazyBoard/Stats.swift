@@ -4,7 +4,14 @@ import Foundation
 enum Stats {
     private static let metrics: [(title: String, match: String)] = [
         ("Enter เข้าตรวจ", "hold enter"),
-        ("Ctrl+Enter ข้ามตรวจ", "enter sent: ctrl bypass"),
+        ("Enter ส่งเลยเพราะคำถูกหมด", "enter sent: looks fine"),
+        ("ตรวจตามหลัง: Claude เห็นด้วย", "shadow: claude agrees"),
+        ("ตรวจตามหลัง: Claude จะแก้", "shadow: claude would change"),
+        ("Haiku ไม่มั่นใจ ส่งต่อ Opus", "cascade: fast model unsure"),
+        ("Opus เจอคำผิดที่ Haiku พลาด", "cascade: strong fixed it"),
+        ("Enter ส่งเลย", "enter sent: plain"),
+        ("Ctrl+Enter ขอให้ตรวจ", "hold why: asked"),
+        ("Ctrl+Enter ข้ามตรวจ (แบบเดิม)", "enter sent: ctrl bypass"),
         ("Enter ยังตรวจอยู่", "enter ignored: still checking"),
         ("Enter ส่งเลยไม่รอตรวจ", "enter sent while checking"),
         ("ตรวจไม่ทัน", "hold timeout"),
