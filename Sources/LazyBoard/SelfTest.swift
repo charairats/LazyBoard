@@ -203,6 +203,24 @@ enum SelfTest {
         expect("ivcxx", "รอแปป", .englishToThai)               // the spell checker passes ivcxx as Roman numerals
         expect("ok ivcxx ", "รอแปป ", .englishToThai)
         expect("w,", nil)                                       // two-key slang (ไม) is not forced
+        // Tech words typed on the Thai layout, from the 2026-11-03 data.
+        for (thai, english) in [("พำยน", "repo"), ("ยีห้", "push"), ("ยีสส", "pull"), ("ฟยร", "api"),
+                                ("แะพส", "ctrl"), ("แทก", "cmd"), ("าคห", "k8s"),
+                                ("ดำฟะีพำฝิีรสกขำหรท", "feature/build-esim"), ("ฑฎฤฏ?ฎใทก", "README.md"),
+                                ("สำอำสหใทฟปศำอำส", "levels.maxLevel")] {
+            expect("ดู \(thai) ", english + " ", .thaiToEnglish)
+        }
+        expect("ทดสอบ สocal ", "local ", .thaiToEnglish)        // switched one key into the word
+        expect("เข้า สogin ", "login ", .thaiToEnglish)
+        // ทอย (mvp) and หระ (sit) are Thai dictionary words: left for Claude to judge.
+        for s in ["ดูหนังกัน ", "ไปกินข้าว ", "ฝนตก ", "ในห้อง ", "พี่จีน ", "เพราะว่า ", "ดู ทอย ", "ดู หระ "] { expect(s, nil) }
+        // Roman numerals are typed in capitals; lowercase ones are Thai keys.
+        check("iv is not English", !d.isEnglishWord("iv"))
+        check("ivcxx is not English", !d.isEnglishWord("ivcxx"))
+        check("IV is English", d.isEnglishWord("IV"))
+        for w in ["mid", "mix", "civic", "did", "ill"] { check("\(w) stays English", d.isEnglishWord(w)) }
+        expect("ส่ง PR แล้วนะ iv ", "รอ ", .englishToThai)
+        expect("รอ IV ", nil)
         for s in ["รอแปป รอแพพ", "เริ่ด", "ปังมาก จึ้งมาก ฉ่ำ", "ผิดบาน เลย", "ได้ป่าว ค้าบ", "ทำไง งับ"] {
             check("slang looks fine: \(s)", LLMSuggester.looksFine(s), "\(LLMSuggester.doubts(in: s))")
         }

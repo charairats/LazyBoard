@@ -82,6 +82,12 @@ final class Detector {
         "กุ", "กู", "มึง", "แก", "ตะเอง", "ตัวเอง", "เค้า", "คือแบบ", "แบบว่า", "จัดไป", "จัดให้", "เบิ้ล", "เพลีย",
     ]
 
+    /// Everyday English words spelled only with Roman numeral letters, which stay English in lowercase.
+    static let romanLetterWords: Set<String> = [
+        "civic", "civil", "did", "dill", "dim", "div", "id", "ill", "lid", "livid", "mic", "mid", "mild", "mill",
+        "mimic", "mix", "vim", "vivid",
+    ]
+
     /// Dev and product words macOS's dictionary does not know; never treated as mistyped Thai.
     static let knownEnglish: Set<String> = [
         "google", "github", "gitlab", "bitbucket", "api", "apis", "backend", "frontend", "fullstack", "devops",
@@ -97,6 +103,9 @@ final class Detector {
         "azure", "cloudflare", "nginx", "linux", "ubuntu", "homebrew", "brew", "cli", "sdk", "ide", "vscode", "cursor",
         "copilot", "chatgpt", "openai", "claude", "anthropic", "llm", "ai", "ml", "ok", "okay", "lol", "btw", "fyi",
         "asap", "tbh", "imo", "idk", "wfh", "eta", "nirvania", "lazyboard",
+        "mvp", "ctrl", "cmd", "alt", "esc", "md", "yml", "txt", "py", "sh", "rb", "kt", "tsx", "jsx", "mjs", "dto",
+        "cms", "seo", "otp", "esim", "adhoc", "stg", "prd", "regex", "cron", "enum", "bool", "async", "ngrok", "rtk",
+        "repo", "api", "sit", "push", "pull",
         "html", "css", "http", "https", "url", "xml", "csv", "tsv", "pdf", "png", "jpg", "jpeg", "svg", "gif", "dvd",
         "ssh", "ssl", "tls", "tcp", "udp", "dns", "vpn", "cdn", "mcp", "gpt", "kpi", "crm", "erp", "pm", "hr", "tv", "pc",
         "hmm", "shh", "mr", "mrs", "ms", "dr", "st", "nd", "rd", "th",
@@ -156,7 +165,27 @@ final class Detector {
         if KeyMap.isThaiLayoutWord(scalars) {
             return thaiToEnglishVerdict(word, scalars, isLast: isLast)
         }
+        // The layout switched a key or two into an English word (สogin, สocal): those keys were meant as English too.
+        let thaiHead = scalars.prefix(while: KeyMap.isThai).count
+        if (1...2).contains(thaiHead), scalars.count - thaiHead >= 2,
+           scalars.dropFirst(thaiHead).allSatisfy({ $0.value < 0x80 && CharacterSet.letters.contains($0) }) {
+            let english = KeyMap.convert(scalars, direction: .thaiToEnglish)
+            if english.count >= 4, isEnglishWord(english) { return WordVerdict(direction: .thaiToEnglish, confidence: .strong) }
+        }
         return .none
+    }
+
+    /// Code-ish text with separators or digits whose every word part is one we know: feature/build-esim,
+    /// README.md, levels.maxLevel, k8s. Parts split on . / _ - and on camelCase humps.
+    func isDevToken(_ text: String) -> Bool {
+        let core = text.trimmingCharacters(in: CharacterSet(charactersIn: "\"'(),?!;:[]{}"))
+        guard core.count >= 3, core.range(of: "^[A-Za-z0-9][A-Za-z0-9./_-]*[A-Za-z0-9]$", options: .regularExpression) != nil,
+              core.contains(where: { "./_-".contains($0) || $0.isNumber }) else { return false }
+        if Self.knownEnglish.contains(core.lowercased()) { return true }
+        guard core.range(of: "[./_-]", options: .regularExpression) != nil else { return false }
+        let spaced = core.replacingOccurrences(of: "([a-z])([A-Z])", with: "$1 $2", options: .regularExpression)
+        let parts = spaced.split(whereSeparator: { " ./_-".contains($0) }).map(String.init).filter { !$0.allSatisfy(\.isNumber) }
+        return parts.count >= 2 && parts.allSatisfy { $0.count >= 2 && isEnglishWord($0) } && parts.contains { $0.count >= 3 }
     }
 
     // MARK: English layout → Thai
@@ -214,6 +243,11 @@ final class Detector {
         if scalars.count >= 2, english.range(of: "^[0-9][0-9.,:%/-]*$", options: .regularExpression) != nil {
             return WordVerdict(direction: .thaiToEnglish, confidence: .strong)
         }
+        // Branch names, file names, paths (feature/build-esim, README.md, k8s): every part a word we know.
+        let devToken = isDevToken(english)
+        if devToken, !Self.isRealThai(word) {
+            return WordVerdict(direction: .thaiToEnglish, confidence: .strong)
+        }
         guard english.range(of: "^[A-Za-z]+(?:['-][A-Za-z]+)*[.,!?]?$", options: .regularExpression) != nil else { return .none }
         let core = english.trimmingCharacters(in: trimSet)
 
@@ -233,6 +267,11 @@ final class Detector {
         }
         // Short acronym typed with Shift on the Thai layout (ญพ = PR): rare consonants, no vowel, a known word.
         if englishOK, !thaiHasVowel, core.count >= 2, scalars.contains(where: { KeyMap.shiftLayerThai.contains($0) }) {
+            return WordVerdict(direction: .thaiToEnglish, confidence: .strong)
+        }
+        // A real English or dev word whose keys make no Thai word (ยีห้ = push, พำยน = repo): spelling rules
+        // alone could not tell, the Thai dictionary can.
+        if englishOK, core.count >= 3, !Self.isRealThai(word) {
             return WordVerdict(direction: .thaiToEnglish, confidence: .strong)
         }
         // Every key shifted and no Thai reading (์ญฉ = NPC): an acronym typed on the Thai layout.
@@ -282,6 +321,9 @@ final class Detector {
         if w.isEmpty { return false }
         if w.count == 1 { return true }
         if Self.knownEnglish.contains(w.lowercased()) { return true }
+        // Roman numerals only count in capitals (รอ IV): the spell checker passes lowercase iv and ivcxx,
+        // which are รอ and รอแปป typed on the English layout.
+        if w.range(of: "^[ivxlcdm]+$", options: .regularExpression) != nil { return Self.romanLetterWords.contains(w) }
         // The spell checker passes vowel-less strings as abbreviations (dvdd, dd-dv), so กอกก would become dvdd.
         let parts = w.lowercased().split(separator: "-").map(String.init)
         let spelled = parts.allSatisfy { part in
