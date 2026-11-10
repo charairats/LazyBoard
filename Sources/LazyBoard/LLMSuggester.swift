@@ -88,6 +88,8 @@ final class LLMSuggester {
 
     private var pending: DispatchWorkItem?
     private var task: URLSessionDataTask?
+    /// The stronger model's API request, when the fast one was unsure (API backend).
+    private var strongTask: URLSessionDataTask?
     private var cache: [String: Reply] = [:]
     private var backoffUntil = Date.distantPast
     private let session: URLSession = {
@@ -419,28 +421,84 @@ final class LLMSuggester {
     }
 
     /// After a message went out unchecked, ask the stronger model anyway, only to measure what the local check
-    /// lets through. Nothing is shown. Skipped while it is busy, and on the API backend.
+    /// lets through. Nothing is shown. Always through the Claude CLI (the subscription), whatever the backend:
+    /// never through the API, which would bill every sent message. Skipped quietly when the CLI is not usable.
     func shadowCheck(_ segment: String, completion: @escaping (Reply) -> Void) {
-        guard isReady, backend == .claudeCLI, !warmStrong.isBusy, Date() >= backoffUntil else {
-            Log.write("shadow: skipped")
+        guard cliUsable, !warmStrong.isBusy, backend == .api || Date() >= backoffUntil else {
+            Log.write(cliSignedOut ? "shadow: skipped, cli unavailable" : "shadow: skipped")
             return
         }
-        warmStrong.send(Self.userMessage(for: segment), model: Self.strongModel) { reply, _ in
-            guard let reply = reply else { Log.write("shadow: no reply"); return }
+        warmStrong.send(Self.userMessage(for: segment), model: Self.strongModel) { [weak self] reply, error in
+            guard let reply = reply else {
+                Log.write("shadow: no reply" + (error.map { ": \($0.prefix(120))" } ?? ""))
+                self?.noteCLIFailure(error)
+                return
+            }
+            self?.noteCLISuccess()
             completion(reply)
         }
     }
 
-    /// Whether a message the fast model passed can go to the stronger one right now.
-    var canEscalate: Bool { isReady && backend == .claudeCLI && model != Self.strongModel && !warmStrong.isBusy }
+    // MARK: Claude CLI health
 
+    /// The CLI failed to log in, or gave no answer several times in a row: no more CLI requests
+    /// (shadow checks above all) until a CLI call works again, the menu's Retry, or a relaunch.
+    private(set) var cliSignedOut = false
+    private var cliFailures = 0
+    static let cliFailureLimit = 3
+
+    /// The CLI is installed, switched on and not known to be signed out.
+    var cliUsable: Bool { isEnabled && Self.claudePath != nil && !cliSignedOut }
+
+    static func isLoginError(_ msg: String) -> Bool {
+        msg.contains("logged in") || msg.contains("authenticate") || msg.contains("OAuth") || msg.contains("/login")
+    }
+
+    private func noteCLIFailure(_ error: String?) {
+        guard error != "busy" else { return }
+        let login = error.map(Self.isLoginError) ?? false
+        cliFailures += 1
+        guard !cliSignedOut, login || cliFailures >= Self.cliFailureLimit else { return }
+        cliSignedOut = true
+        Log.write("cli: marked unavailable (\(login ? "login error" : "\(cliFailures) failures in a row"))")
+        warmStrong.stop()
+    }
+
+    private func noteCLISuccess() {
+        cliFailures = 0
+        guard cliSignedOut else { return }
+        cliSignedOut = false
+        Log.write("cli: available again")
+    }
+
+    /// Menu Retry: try the CLI again.
+    func resetCLIHealth() {
+        cliFailures = 0
+        if cliSignedOut { Log.write("cli: retry from menu") }
+        cliSignedOut = false
+    }
+
+    /// Whether a message the fast model passed can go to the stronger one right now.
+    var canEscalate: Bool {
+        guard isReady, model != Self.strongModel else { return false }
+        switch backend {
+        case .api: return strongTask == nil
+        case .claudeCLI: return !cliSignedOut && !warmStrong.isBusy
+        }
+    }
+
+    /// Start the stronger model's CLI process early (CLI backend only; the API needs no warming).
     func prewarmStrong() {
-        guard canEscalate else { return }
+        guard backend == .claudeCLI, canEscalate else { return }
         warmStrong.prewarm(model: Self.strongModel)
     }
 
     /// Ask the stronger model about a segment the fast one left unchanged. The reply arrives like any other.
     func escalate(_ segment: String) {
+        if backend == .api {
+            request(segment, strong: true)
+            return
+        }
         warmRequestID += 1
         let myID = warmRequestID
         let started = Date()
@@ -453,9 +511,11 @@ final class LLMSuggester {
             }
             guard let reply = reply else {
                 Log.write("llm strong error: \((error ?? "error").prefix(200))")
+                self.noteCLIFailure(error)
                 self.onFailed?(segment)
                 return
             }
+            self.noteCLISuccess()
             Log.write(String(format: "llm strong reply in %.1fs, changed=%@", Date().timeIntervalSince(started), reply.fixed != segment ? "yes" : "no"))
             self.cache[segment] = reply
             if reply.fixed != segment { self.onResult?(segment, reply) }
@@ -531,15 +591,17 @@ final class LLMSuggester {
             }
             guard let reply = reply else {
                 let msg = error ?? "error"
-                let loginProblem = msg.contains("logged in") || msg.contains("authenticate") || msg.contains("OAuth") || msg.contains("/login")
+                let loginProblem = Self.isLoginError(msg)
                 self.lastError = loginProblem
                     ? "Claude Code login หมดอายุ: รัน claude ใน Terminal แล้ว /login หรือใช้ API key แทน"
                     : String(msg.prefix(160))
                 Log.write("llm warm error: \(msg.prefix(200))")
                 self.backoffUntil = Date().addingTimeInterval(loginProblem ? 60 : 10)
+                self.noteCLIFailure(msg)
                 self.onFailed?(segment)
                 return
             }
+            self.noteCLISuccess()
             self.lastError = nil
             self.lastLatency = Date().timeIntervalSince(started)
             Log.write(String(format: "llm warm reply in %.1fs, changed=%@, alternatives=%d, unsure=%@", self.lastLatency,
@@ -574,6 +636,8 @@ final class LLMSuggester {
         queuedSegment = nil
         task?.cancel()
         task = nil
+        strongTask?.cancel()
+        strongTask = nil
         if let p = process, p.isRunning {
             Log.write("llm cli cancelled")
             p.terminate()
@@ -623,8 +687,12 @@ final class LLMSuggester {
 
     // MARK: Request
 
-    private func request(_ segment: String) {
+    /// One Messages API call. `strong`: the stronger model's second look after the fast one was unsure.
+    /// It has its own task, so the fast model's queue keeps moving, and shows no loading dots of its own
+    /// (the held message is already glowing).
+    private func request(_ segment: String, strong: Bool = false) {
         guard let apiKey = apiKey else { return }
+        let useModel = strong ? Self.strongModel : model
         var req = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -632,7 +700,7 @@ final class LLMSuggester {
         req.setValue("2026-10-21", forHTTPHeaderField: "anthropic-version")
 
         let body: [String: Any] = [
-            "model": model.rawValue,
+            "model": useModel.rawValue,
             "max_tokens": 4096,
             "system": Self.systemPrompt,
             "output_config": [
@@ -656,15 +724,24 @@ final class LLMSuggester {
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
         requestCount += 1
         let started = Date()
+        let tag = strong ? "llm strong" : "llm api"
 
-        Log.write("llm api start (\(segment.unicodeScalars.count) keys)")
-        inFlightSegment = segment
-        onStarted?(segment)
-        task = session.dataTask(with: req) { [weak self] data, response, error in
+        if strong {
+            Log.write("llm strong start (\(segment.unicodeScalars.count) keys, \(useModel.rawValue), api)")
+        } else {
+            Log.write("llm api start (\(segment.unicodeScalars.count) keys)")
+            inFlightSegment = segment
+            onStarted?(segment)
+        }
+        let t = session.dataTask(with: req) { [weak self] data, response, error in
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                self.task = nil
-                self.inFlightSegment = nil
+                if strong {
+                    self.strongTask = nil
+                } else {
+                    self.task = nil
+                    self.inFlightSegment = nil
+                }
                 var failed = true
                 defer {
                     if failed { self.onFailed?(segment) }
@@ -673,13 +750,13 @@ final class LLMSuggester {
                 if let error = error as NSError?, error.code == NSURLErrorCancelled { return }
                 guard let http = response as? HTTPURLResponse, let data = data else {
                     self.lastError = error?.localizedDescription ?? "network error"
-                    Log.write("llm api error: \(self.lastError ?? "")")
+                    Log.write("\(tag) error: \(self.lastError ?? "")")
                     return
                 }
                 if http.statusCode != 200 {
                     // The API's own error message, never the typed text.
                     let apiMessage = ((try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? [String: Any])?["message"] as? String ?? ""
-                    Log.write("llm api HTTP \(http.statusCode): \(apiMessage.prefix(200))")
+                    Log.write("\(tag) HTTP \(http.statusCode): \(apiMessage.prefix(200))")
                 }
                 switch http.statusCode {
                 case 200:
@@ -700,20 +777,36 @@ final class LLMSuggester {
                 }
                 guard let reply = Self.parseReply(data) else {
                     self.lastError = "อ่านคำตอบไม่ได้"
-                    Log.write("llm api unreadable reply")
+                    Log.write("\(tag) unreadable reply")
                     return
                 }
                 failed = false
                 self.lastError = nil
-                self.lastLatency = Date().timeIntervalSince(started)
-                Log.write(String(format: "llm api reply in %.1fs, changed=%@, alternatives=%d", self.lastLatency, reply.fixed != segment ? "yes" : "no", reply.alternatives.count))
+                let latency = Date().timeIntervalSince(started)
+                if strong {
+                    Log.write(String(format: "llm strong reply in %.1fs, changed=%@", latency, reply.fixed != segment ? "yes" : "no"))
+                } else {
+                    self.lastLatency = latency
+                    Log.write(String(format: "llm api reply in %.1fs, changed=%@, alternatives=%d, unsure=%@", latency,
+                                     reply.fixed != segment ? "yes" : "no", reply.alternatives.count, reply.unsure ? "yes" : "no"))
+                    if self.escalateIfUnsure.remove(segment) != nil, reply.unsure {
+                        if self.canEscalate {
+                            Log.write("cascade: fast model unsure, asking the strong one")
+                            self.onEscalated?(segment)
+                            self.escalate(segment)
+                            return
+                        }
+                        Log.write("cascade: skipped, strong model busy")
+                    }
+                }
                 self.cache[segment] = reply
                 if self.cache.count > 500 { self.cache.removeAll() }
                 if reply.fixed != segment { self.onResult?(segment, reply) }
                 self.onFinished?(segment, reply)
             }
         }
-        task?.resume()
+        if strong { strongTask = t } else { task = t }
+        t.resume()
     }
 
     // MARK: Claude Code CLI backend

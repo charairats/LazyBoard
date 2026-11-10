@@ -454,7 +454,7 @@ final class KeyMonitor {
                 if segment.unicodeScalars.count >= Self.holdMinimumKeys {
                     let showing = suggestion?.source == .llm ? ", fix was showing" : ""
                     Log.write("enter sent: plain (\(segment.unicodeScalars.count) keys\(showing))")
-                    if llm.isReady, !llm.rewrites, !llm.isChecked(segment) {
+                    if llm.isEnabled, !llm.rewrites, !llm.isChecked(segment) {
                         // Off the key path: the check runs after the Enter is already on its way.
                         DispatchQueue.main.async { [weak self] in self?.shadowCheck(segment) }
                     }

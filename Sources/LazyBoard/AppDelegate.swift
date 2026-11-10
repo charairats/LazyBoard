@@ -332,7 +332,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         guard llm.isEnabled else { return nil }
         if llm.backend == .api && llm.apiKey == nil { return "No API key set" }
         if llm.backend == .claudeCLI && LLMSuggester.claudePath == nil { return "claude command not found (install Claude Code, or use an API key)" }
-        return llm.lastError.map(Self.englishError)
+        if let err = llm.lastError { return Self.englishError(err) }
+        // The after-send check always uses the CLI, so a signed-out CLI matters on the API backend too.
+        if llm.cliSignedOut { return "CLI signed out, run claude then /login" }
+        return nil
     }
 
     /// LLMSuggester reports errors in Thai; the menu is English.
@@ -389,6 +392,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         case .alertFirstButtonReturn: editAPIKey()
         case .alertSecondButtonReturn:
             monitor.llm.lastError = nil
+            monitor.llm.resetCLIHealth()
             Log.write("llm: error cleared from menu")
             refreshMenuState()
         default: break
