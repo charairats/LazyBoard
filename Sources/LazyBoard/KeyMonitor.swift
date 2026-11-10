@@ -68,7 +68,7 @@ final class KeyMonitor {
         var decidedAt: Date?
         /// What the local check doubted, to compare with what Claude did.
         var doubts: [(word: String, why: LLMSuggester.Doubt)] = []
-        /// The fast model found nothing and the stronger one is checking.
+        /// Ctrl+Enter: Sonnet or Opus is checking (the bubble glows, the timeout is longer).
         var escalated = false
     }
     /// Enter pressed right as the fix appears was meant for the waiting state, not for "send as typed".
@@ -136,10 +136,7 @@ final class KeyMonitor {
                 e.post(tap: .cghidEventTap)
             }
         }
-        llm.onEscalated = { [weak self] original in
-            guard let self = self, let h = self.hold, h.segment == original else { return }
-            self.escalated(h)
-        }
+        llm.currentText = { [weak self] in self?.syncedBuffer(log: false) ?? "" }
         llm.onFailed = { [weak self] original in
             guard let self = self, let h = self.hold, h.segment == original else { return }
             Log.write("hold: check failed")
@@ -152,7 +149,7 @@ final class KeyMonitor {
     /// Tab, or a click on the fix: put it in the text. A held message then waits for Enter.
     private func accept(_ s: Suggestion) {
         lastTabFix = Date()
-        guard let h = hold else { apply(s); return }
+        guard let h = hold else { apply(s, keepCheck: true); return }
         // Fix the text in place; the user sends with Enter when they are happy with it.
         apply(s)
         hold = nil
@@ -197,15 +194,6 @@ final class KeyMonitor {
         }
     }
 
-    /// The fast model was unsure: keep holding, glowing, while the stronger one has its turn. The timers start over.
-    private func escalated(_ h: Hold) {
-        var next = h
-        next.escalated = true
-        next.started = Date()
-        hold = next
-        panel.showLoading(near: Caret.anchorPoint(), glow: true)
-        scheduleHoldTimers()
-    }
 
     /// Seconds the fix has been on screen.
     private static func sinceDecided(_ h: Hold) -> TimeInterval { Date().timeIntervalSince(h.decidedAt ?? Date()) }
@@ -268,6 +256,7 @@ final class KeyMonitor {
         guard tap == nil else { return true }
         let mask: CGEventMask =
             (1 << CGEventType.keyDown.rawValue) |
+            (1 << CGEventType.flagsChanged.rawValue) |
             (1 << CGEventType.leftMouseDown.rawValue) |
             (1 << CGEventType.rightMouseDown.rawValue) |
             (1 << CGEventType.otherMouseDown.rawValue)
@@ -306,8 +295,72 @@ final class KeyMonitor {
         quietCheckDue = false
         quietSegment = nil
         llmBase = nil
+        switchIntent = nil
         llm.cancel()
         panel.hide()
+    }
+
+    // MARK: Caps Lock: the layout the writer meant
+
+    /// Caps Lock was pressed to switch layout. If the next keys still come out on the old layout (macOS switches a
+    /// moment late, or the press did not register as a switch), those words are converted without asking.
+    private struct SwitchIntent {
+        var at: Date
+        var wantThai: Bool
+        /// The first key after the press came out on the old layout.
+        var armed = false
+    }
+    private var switchIntent: SwitchIntent?
+    /// Script of the last letter typed, kept across lines: the layout the writer was on before Caps Lock.
+    private var lastLetterThai: Bool?
+    static let intentWindow: TimeInterval = 2
+    static let intentLifetime: TimeInterval = 15
+
+    private func noteSwitchIntent() {
+        let now = Date()
+        let wantThai: Bool
+        if let i = switchIntent, now.timeIntervalSince(i.at) < 1.5, !i.armed {
+            wantThai = !i.wantThai // pressed twice: back to where it was
+        } else {
+            wantThai = !(lastLetterThai ?? InputSource.currentIsThai())
+        }
+        switchIntent = SwitchIntent(at: now, wantThai: wantThai)
+    }
+
+    /// Called for every typed character: does it follow the switch, or is it still on the old layout?
+    private func trackSwitchIntent(_ typed: String) {
+        guard let sc = typed.unicodeScalars.first, typed.unicodeScalars.count == 1,
+              KeyMap.isThai(sc) || (sc.value < 0x80 && CharacterSet.letters.contains(sc)) else { return }
+        let thai = KeyMap.isThai(sc)
+        defer { lastLetterThai = thai }
+        guard let i = switchIntent else { return }
+        let age = Date().timeIntervalSince(i.at)
+        if thai == i.wantThai || age > Self.intentLifetime || (!i.armed && age > Self.intentWindow) {
+            switchIntent = nil
+            return
+        }
+        if !i.armed {
+            switchIntent?.armed = true
+            Log.write("switch: keys still on the old layout after Caps Lock")
+        }
+    }
+
+    /// The word just typed (before the trailing space, if any) as it would read on the layout Caps Lock asked for.
+    private func intentCandidate() -> Suggestion? {
+        guard autoFixLayout, let i = switchIntent, i.armed, Date().timeIntervalSince(i.at) <= Self.intentLifetime else { return nil }
+        let scalars = Array(buffer.unicodeScalars)
+        let trailing = scalars.last == " " ? 1 : 0
+        var start = scalars.count - trailing
+        while start > 0, scalars[start - 1] != " ", scalars[start - 1] != "\n" { start -= 1 }
+        let word = String(String.UnicodeScalarView(scalars[start..<(scalars.count - trailing)]))
+        guard !word.isEmpty, !detector.ignoredWords.contains(word), !Caret.keysAreNotTyping() else { return nil }
+        guard let converted = Detector.intentConversion(word, wantThai: i.wantThai) else {
+            // A real word on the old layout: the writer meant it, so the press was not a switch for this text.
+            switchIntent = nil
+            return nil
+        }
+        return Suggestion(scalarCount: word.unicodeScalars.count + trailing, replacement: converted + (trailing == 1 ? " " : ""),
+                          direction: i.wantThai ? .englishToThai : .thaiToEnglish, source: .layout)
     }
 
     // MARK: Event handling
@@ -320,6 +373,11 @@ final class KeyMonitor {
             return passThrough
         }
         if event.getIntegerValueField(.eventSourceUserData) == Self.magicTag { return passThrough }
+        // Modifier keys are not typing. Caps Lock is how the writer switches layout: it says which one they meant.
+        if type == .flagsChanged {
+            if isEnabled, Int(event.getIntegerValueField(.keyboardEventKeycode)) == kVK_CapsLock { noteSwitchIntent() }
+            return passThrough
+        }
         // A click on the popup is a choice made in it, not the writer leaving the text.
         if type != .keyDown, panel.contains(screenPoint: event.location) { return passThrough }
         guard type == .keyDown else { reset(); return passThrough }
@@ -441,7 +499,7 @@ final class KeyMonitor {
                 return passThrough
             }
             var fixedFirst = false
-            if let s = autoFixCandidate() {
+            if let s = autoFixCandidate() ?? intentCandidate() {
                 Log.write("auto layout fix on enter (\(s.scalarCount) keys)")
                 apply(s, automatic: true)
                 fixedFirst = true
@@ -478,15 +536,7 @@ final class KeyMonitor {
             }
             if holdOnEnter, llm.isReady, review || llm.rewrites {
                 let enterStart = Date()
-                // The buffer forgets text after a mouse click or arrow key; the field itself does not.
-                // Only the line the caret is on: the field can hold a whole document or terminal scrollback.
-                let bufferLine = LLMSuggester.lastLine(of: buffer)
-                if let line = Caret.focusedLineAtEnd() {
-                    if line != bufferLine, line.unicodeScalars.count > bufferLine.unicodeScalars.count {
-                        Log.write("enter: using field text (\(line.unicodeScalars.count) keys) instead of buffer (\(bufferLine.unicodeScalars.count))")
-                        buffer = String(buffer.unicodeScalars.dropLast(bufferLine.unicodeScalars.count)) + line
-                    }
-                }
+                _ = syncedBuffer(log: true)
                 let segment = LLMSuggester.segment(of: buffer)
                 var mustCheck = false
                 var doubts: [(word: String, why: LLMSuggester.Doubt)] = []
@@ -515,12 +565,16 @@ final class KeyMonitor {
                     }
                 }
                 if mustCheck {
-                    hold = Hold(keyCode: keyCode, flags: flags, segment: segment, started: Date(), doubts: doubts)
-                    llm.prewarmStrong()
+                    // Ctrl+Enter goes straight to the chosen Sonnet or Opus, in one call, with the glowing bubble.
+                    let strong = review && !enterChecks && !llm.rewrites
+                    var h = Hold(keyCode: keyCode, flags: flags, segment: segment, started: Date(), doubts: doubts)
+                    h.escalated = strong
+                    hold = h
                     let fieldRead = Date()
-                    panel.showLoading(near: Caret.anchorPoint())
+                    panel.showLoading(near: Caret.anchorPoint(), glow: strong)
                     let bubbleShown = Date()
-                    llm.checkNow(buffer, escalate: review && !enterChecks)
+                    if strong { Log.write("ctrl+enter: asking \(llm.strongModel.title)") }
+                    llm.checkNow(buffer, strong: strong)
                     Log.write("hold enter (\(segment.unicodeScalars.count) keys)")
                     if Date().timeIntervalSince(enterStart) >= 0.15 {
                         Log.write(String(format: "enter slow: field %.2fs, bubble %.2fs, request %.2fs",
@@ -585,6 +639,7 @@ final class KeyMonitor {
             let typed = InputSource.resolved(eventText: eventText,
                                              layoutText: InputSource.characters(keyCode: keyCode, flags: flags))
             if typed != eventText { Log.write("key: event and layout disagree, using layout") }
+            trackSwitchIntent(typed)
             for sc in typed.unicodeScalars where sc.value < 0x20 || (0xF700...0xF8FF).contains(sc.value) {
                 reset()
                 return passThrough
@@ -597,10 +652,13 @@ final class KeyMonitor {
             if typed == " " {
                 if let s = autoFixCandidate() {
                     Log.write("auto layout fix on space (\(s.scalarCount) keys)")
-                    apply(s, automatic: true)
+                    apply(s, automatic: true, keepCheck: true)
+                } else if let s = intentCandidate() {
+                    Log.write("auto layout fix after switch (\(s.scalarCount) keys)")
+                    apply(s, automatic: true, keepCheck: true)
                 } else if autoFixLayout, let s = thaiTypoCandidate() {
                     Log.write("auto thai typo fix on space (\(s.scalarCount) keys)")
-                    apply(s, automatic: true)
+                    apply(s, automatic: true, keepCheck: true)
                 } else {
                     quietCheckOnSpace()
                 }
@@ -611,7 +669,7 @@ final class KeyMonitor {
 
     private func newline(keyCode: Int, flags: CGEventFlags, passThrough: Unmanaged<CGEvent>) -> Unmanaged<CGEvent>? {
         var fixedFirst = false
-        if let s = autoFixCandidate() {
+        if let s = autoFixCandidate() ?? intentCandidate() {
             Log.write("auto layout fix on newline (\(s.scalarCount) keys)")
             apply(s, automatic: true)
             fixedFirst = true
@@ -631,13 +689,26 @@ final class KeyMonitor {
         return passThrough
     }
 
+    /// The buffer forgets text after a mouse click or arrow key; the field itself does not. When the field's
+    /// current line (caret at its end) is longer than the buffer's, take it. Only the caret's line: the field
+    /// can hold a whole document or terminal scrollback.
+    private func syncedBuffer(log: Bool) -> String {
+        let bufferLine = LLMSuggester.lastLine(of: buffer)
+        if let line = Caret.focusedLineAtEnd(log: log), line != bufferLine,
+           line.unicodeScalars.count > bufferLine.unicodeScalars.count {
+            Log.write("\(log ? "enter" : "check"): using field text (\(line.unicodeScalars.count) keys) instead of buffer (\(bufferLine.unicodeScalars.count))")
+            buffer = String(buffer.unicodeScalars.dropLast(bufferLine.unicodeScalars.count)) + line
+        }
+        return buffer
+    }
+
     /// Space after a word that looks off (mixed scripts, unknown Thai such as ภาาษา): remember it, and on the
     /// next space (one more word of context) ask the fast model quietly. Its fix waits for Tab; Enter will not send over it.
     private func quietCheckOnSpace() {
         guard llm.isReady, !llm.rewrites, suggestion == nil, cycle == nil, hold == nil else { return }
         if quietCheckDue {
             quietCheckDue = false
-            if let segment = llm.checkQuiet(buffer) {
+            if let segment = llm.checkQuiet(syncedBuffer(log: false)) {
                 quietSegment = segment
                 Log.write("quiet check on space (\(segment.unicodeScalars.count) keys)")
             }
@@ -736,7 +807,8 @@ final class KeyMonitor {
             reset()
             return
         }
-        llm.cancel()
+        // The pause timer waits; a check already on its way keeps going (an auto fix re-checks the line).
+        llm.cancelPending()
         guard next != suggestion || !panel.isVisible else { return }
         suggestion = next
         if let s = next {
@@ -750,6 +822,10 @@ final class KeyMonitor {
         // (ignoring trailing spaces), or the result is stale.
         guard cycle == nil else { return }
         if original == quietSegment { quietSegment = nil }
+        if suggestion?.source == .layout, hold?.segment != original {
+            Log.write("llm result held back: layout fix showing")
+            return
+        }
         // A held Enter needs the segment to still end the line; a quiet check may have been typed past.
         let trailing = trailingBlanks()
         let s: Suggestion
@@ -828,11 +904,14 @@ final class KeyMonitor {
 
     // MARK: Applying a fix
 
-    private func apply(_ s: Suggestion, automatic: Bool = false) {
+    /// `keepCheck`: a layout fix while typing must not cost the Claude check that was on its way: the corrected
+    /// line is checked again at once instead.
+    private func apply(_ s: Suggestion, automatic: Bool = false, keepCheck: Bool = false) {
         Log.write("applied \(s.source == .llm ? "llm" : "layout") fix (\(s.scalarCount) keys)\(automatic ? " auto" : "")")
         panel.hide()
         suggestion = nil
-        llm.cancel()
+        let recheck = keepCheck && s.source == .layout && hold == nil && (llm.hasWork || quietSegment != nil)
+        if !recheck { llm.cancel() }
         let source = CGEventSource(stateID: .combinedSessionState)
         for _ in 0..<s.scalarCount { postKey(kVK_Delete, source) }
         postText(s.replacement, source)
@@ -848,6 +927,10 @@ final class KeyMonitor {
 
         if switchLayoutAfterFix, let direction = s.direction {
             InputSource.select(thai: direction == .englishToThai)
+        }
+        if recheck, let segment = llm.recheck(buffer) {
+            quietSegment = segment
+            Log.write("recheck after layout fix (\(segment.unicodeScalars.count) keys)")
         }
         if s.source == .llm, !s.alternatives.isEmpty {
             let options = [s.replacement] + s.alternatives

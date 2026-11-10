@@ -6,11 +6,21 @@ import Foundation
 final class LLMSuggester {
     enum Model: String, CaseIterable {
         case haiku = "claude-haiku-5-5"
+        case sonnet = "claude-sonnet-5-5"
         case opus = "claude-opus-5-5"
         var title: String {
             switch self {
-            case .haiku: return "Haiku 5.5 (เร็ว ถูก)"
-            case .opus: return "Opus 5.5 (แม่นกว่า)"
+            case .haiku: return "Haiku 5.5"
+            case .sonnet: return "Sonnet 5.5"
+            case .opus: return "Opus 5.5"
+            }
+        }
+        /// The alias the Claude CLI takes for --model.
+        var cliName: String {
+            switch self {
+            case .haiku: return "haiku"
+            case .sonnet: return "sonnet"
+            case .opus: return "opus"
             }
         }
     }
@@ -59,10 +69,18 @@ final class LLMSuggester {
     private var process: Process?
     private var processID: Int = 0
     private let warm = WarmClaude()
-    /// The stronger model in its own process, so the fast one stays warm: it re-checks a message the fast one
-    /// passed although the local check doubted it, and does the after-send check.
+    /// The Ctrl+Enter model in its own process, so the fast one stays warm.
     private let warmStrong = WarmClaude()
-    static let strongModel: Model = .opus
+    /// The after-send check, always Opus through the CLI, in a process of its own.
+    private let warmShadow = WarmClaude()
+    static let shadowModel: Model = .opus
+    /// Ctrl+Enter asks this model directly, in one call (no fast model first). Sonnet or Opus, from the menu.
+    var strongModel: Model = .sonnet
+    /// Replies from the Ctrl+Enter model, so a later Ctrl+Enter on the same text does not settle for the fast model's.
+    private var strongCache: [String: Reply] = [:]
+    /// Reads the whole current line from the text field when it can, so a while-typing check sees the full
+    /// sentence and not only what was typed since the last click. Returns the (possibly updated) buffer.
+    var currentText: (() -> String)?
     private var warmRequestID = 0
     /// Segment that arrived while a request was in flight; requested when that one finishes.
     private var queuedSegment: String?
@@ -74,10 +92,6 @@ final class LLMSuggester {
     var onFinished: ((String, Reply) -> Void)?
     /// A request that produced no usable reply (error, timeout, refusal).
     var onFailed: ((String) -> Void)?
-    /// The fast model was unsure about a held segment and the stronger one is now checking it.
-    var onEscalated: ((String) -> Void)?
-    /// Segments checked at Enter: if the fast model is unsure about one, the stronger one gets it.
-    private var escalateIfUnsure = Set<String>()
     /// A request has just been sent for this segment (to show the loading indicator).
     var onStarted: ((String) -> Void)?
     private(set) var inFlightSegment: String?
@@ -90,6 +104,9 @@ final class LLMSuggester {
     private var task: URLSessionDataTask?
     /// The stronger model's API request, when the fast one was unsure (API backend).
     private var strongTask: URLSessionDataTask?
+    /// Which API request is current: a reply to an older one (cancelled or replaced) touches nothing.
+    private var apiRequestID = 0
+    private var strongAPIID = 0
     private var cache: [String: Reply] = [:]
     private var backoffUntil = Date.distantPast
     private let session: URLSession = {
@@ -115,6 +132,9 @@ final class LLMSuggester {
     words, never answer or comment on the message. Thai-spelled English dev words (เทส รีเทส ดีพลอย บัค \
     เช็ค รัน คอมมิต) are normal and stay as written; never replace them with formal Thai. So is chat slang and \
     its casual spelling (เริ่ด ปัง จึ้ง ฉ่ำ ตึง รอแปป ผิดบาน ป่าว ค้าบ งับ): it is meant, never a typo.
+    - "suspects", when present, lists words a local check doubted. Look at each one in its sentence: fix it when \
+    it is a slip, including a real word that does not fit the context (หลับ typed for กลับ, เลน for เลย); leave \
+    it as typed when it is fine (a name, slang, a real word that fits). Other words can still need fixing too.
     - Leave real names, product names, code identifiers, URLs and well-known abbreviations as typed, \
     unless the context makes the intended word obvious.
     - "fixed" is your single best full correction of the whole text. The text may be several sentences or \
@@ -179,14 +199,16 @@ final class LLMSuggester {
         pending?.cancel()
         pending = nil
         guard isReady, Date() >= backoffUntil else { return }
-        let segment = Self.segment(of: buffer)
-        guard segment.unicodeScalars.count >= 6 else { queuedSegment = nil; return }
-        if let reply = cache[segment] {
-            if reply.fixed != segment { onResult?(segment, reply) }
-            return
-        }
+        guard Self.segment(of: buffer).unicodeScalars.count >= 6 else { queuedSegment = nil; return }
         let work = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
+            // At the pause, not on every key: the whole line from the field when it can be read.
+            let segment = Self.segment(of: self.currentText?() ?? buffer)
+            guard segment.unicodeScalars.count >= 6 else { self.queuedSegment = nil; return }
+            if let reply = self.cache[segment] {
+                if reply.fixed != segment { self.onResult?(segment, reply) }
+                return
+            }
             if self.isBusy {
                 self.queuedSegment = segment
                 return
@@ -199,23 +221,26 @@ final class LLMSuggester {
 
     private var isBusy: Bool { task != nil || process != nil || warm.isBusy }
 
-    /// Check right now (no debounce), e.g. when Enter is held back. Returns the segment being checked.
+    /// Check right now (no debounce), e.g. when Enter is held back. `strong`: Ctrl+Enter, the chosen
+    /// Sonnet or Opus in one call, no fast model first. Returns the segment being checked.
     @discardableResult
-    func checkNow(_ buffer: String, escalate: Bool = false) -> String? {
+    func checkNow(_ buffer: String, strong: Bool = false) -> String? {
         pending?.cancel()
         pending = nil
         guard isReady else { return nil }
         let segment = Self.segment(of: buffer)
         guard segment.unicodeScalars.count >= 6 else { return nil }
-        if let reply = cache[segment] {
+        if let reply = strong ? strongCache[segment] : cache[segment] {
             DispatchQueue.main.async { [weak self] in
                 if reply.fixed != segment { self?.onResult?(segment, reply) }
                 self?.onFinished?(segment, reply)
             }
             return segment
         }
-        // Haiku -> Opus only when the writer asked for it (Ctrl+Enter).
-        if escalate, model != Self.strongModel { escalateIfUnsure.insert(segment) }
+        if strong {
+            askStrong(segment)
+            return segment
+        }
         if isBusy {
             if inFlightSegment != segment { queuedSegment = segment }
             return segment
@@ -223,6 +248,42 @@ final class LLMSuggester {
         start(segment)
         return segment
     }
+
+    /// An automatic layout fix changed the line under a check: drop that check (its text is gone) and check
+    /// the corrected line at once, so the fix does not cost the check. Returns the segment sent.
+    @discardableResult
+    func recheck(_ buffer: String) -> String? {
+        pending?.cancel()
+        pending = nil
+        queuedSegment = nil
+        task?.cancel()
+        task = nil
+        apiRequestID += 1
+        inFlightSegment = nil
+        if warm.isBusy { warmRequestID += 1 } // a warm reply still in flight will be ignored
+        guard isReady, Date() >= backoffUntil else { return nil }
+        let segment = Self.segment(of: buffer)
+        guard segment.unicodeScalars.count >= 6 else { return nil }
+        if let reply = cache[segment] {
+            if reply.fixed != segment { onResult?(segment, reply) }
+            return nil
+        }
+        if isBusy {
+            queuedSegment = segment
+            return segment
+        }
+        start(segment)
+        return segment
+    }
+
+    /// Stop the debounce only: a request already on its way keeps going.
+    func cancelPending() {
+        pending?.cancel()
+        pending = nil
+    }
+
+    /// Something is on its way or waiting (a debounce, a request, a queued line).
+    var hasWork: Bool { pending != nil || inFlightSegment != nil || queuedSegment != nil }
 
     /// Quiet check after an odd word: the fast model only, at once, no cascade. Returns the segment sent.
     @discardableResult
@@ -236,7 +297,6 @@ final class LLMSuggester {
             if reply.fixed != segment { onResult?(segment, reply) }
             return nil
         }
-        escalateIfUnsure.remove(segment)
         if isBusy {
             if inFlightSegment != segment { queuedSegment = segment }
             return segment
@@ -424,18 +484,19 @@ final class LLMSuggester {
     /// lets through. Nothing is shown. Always through the Claude CLI (the subscription), whatever the backend:
     /// never through the API, which would bill every sent message. Skipped quietly when the CLI is not usable.
     func shadowCheck(_ segment: String, completion: @escaping (Reply) -> Void) {
-        guard cliUsable, !warmStrong.isBusy, backend == .api || Date() >= backoffUntil else {
+        guard cliUsable, !warmShadow.isBusy, backend == .api || Date() >= backoffUntil else {
             Log.write(cliSignedOut ? "shadow: skipped, cli unavailable" : "shadow: skipped")
             return
         }
-        warmStrong.send(Self.userMessage(for: segment), model: Self.strongModel) { [weak self] reply, error in
-            guard let reply = reply else {
+        warmShadow.send(Self.userMessage(for: segment), model: Self.shadowModel) { [weak self] reply, error in
+            guard let self = self else { return }
+            guard let raw = reply else {
                 Log.write("shadow: no reply" + (error.map { ": \($0.prefix(120))" } ?? ""))
-                self?.noteCLIFailure(error)
+                self.noteCLIFailure(error)
                 return
             }
-            self?.noteCLISuccess()
-            completion(reply)
+            self.noteCLISuccess()
+            completion(self.guarded(raw, for: segment))
         }
     }
 
@@ -478,48 +539,83 @@ final class LLMSuggester {
         cliSignedOut = false
     }
 
-    /// Whether a message the fast model passed can go to the stronger one right now.
-    var canEscalate: Bool {
-        guard isReady, model != Self.strongModel else { return false }
-        switch backend {
-        case .api: return strongTask == nil
-        case .claudeCLI: return !cliSignedOut && !warmStrong.isBusy
-        }
-    }
+    private var strongRequestID = 0
 
-    /// Start the stronger model's CLI process early (CLI backend only; the API needs no warming).
+    /// Start the Ctrl+Enter model's CLI process early (CLI backend only; the API needs no warming).
     func prewarmStrong() {
-        guard backend == .claudeCLI, canEscalate else { return }
-        warmStrong.prewarm(model: Self.strongModel)
+        guard isReady, backend == .claudeCLI, !cliSignedOut, !warmStrong.isBusy else { return }
+        warmStrong.prewarm(model: strongModel)
     }
 
-    /// Ask the stronger model about a segment the fast one left unchanged. The reply arrives like any other.
-    func escalate(_ segment: String) {
+    /// Ctrl+Enter: the chosen Sonnet or Opus checks the segment in one call. The reply arrives like any other.
+    private func askStrong(_ segment: String) {
         if backend == .api {
+            strongTask?.cancel() // an earlier Ctrl+Enter still on its way: this one wins
+            strongTask = nil
             request(segment, strong: true)
             return
         }
-        warmRequestID += 1
-        let myID = warmRequestID
+        strongRequestID += 1
+        let myID = strongRequestID
         let started = Date()
-        Log.write("llm strong start (\(segment.unicodeScalars.count) keys, \(Self.strongModel.rawValue))")
-        warmStrong.send(Self.userMessage(for: segment, emoji: emojiMode, polite: polite), model: Self.strongModel) { [weak self] reply, error in
+        let useModel = strongModel
+        requestCount += 1
+        if warmStrong.isBusy { warmStrong.stop() } // an earlier Ctrl+Enter still on its way: this one wins
+        Log.write("llm strong start (\(segment.unicodeScalars.count) keys, \(useModel.rawValue), cli)")
+        warmStrong.send(Self.userMessage(for: segment, emoji: emojiMode, polite: polite), model: useModel) { [weak self] reply, error in
             guard let self = self else { return }
-            guard self.warmRequestID == myID else {
+            guard self.strongRequestID == myID else {
                 Log.write("llm strong reply ignored (cancelled)")
                 return
             }
-            guard let reply = reply else {
-                Log.write("llm strong error: \((error ?? "error").prefix(200))")
+            guard let raw = reply else {
+                let msg = error ?? "error"
+                Log.write("llm strong error: \(msg.prefix(200))")
+                if Self.isLoginError(msg) {
+                    self.lastError = "Claude Code login หมดอายุ: รัน claude ใน Terminal แล้ว /login หรือใช้ API key แทน"
+                }
                 self.noteCLIFailure(error)
                 self.onFailed?(segment)
                 return
             }
             self.noteCLISuccess()
+            let reply = self.guarded(raw, for: segment)
             Log.write(String(format: "llm strong reply in %.1fs, changed=%@", Date().timeIntervalSince(started), reply.fixed != segment ? "yes" : "no"))
-            self.cache[segment] = reply
+            self.storeStrong(segment, reply)
             if reply.fixed != segment { self.onResult?(segment, reply) }
             self.onFinished?(segment, reply)
+        }
+    }
+
+    private func storeStrong(_ segment: String, _ reply: Reply) {
+        strongCache[segment] = reply
+        cache[segment] = reply
+        if strongCache.count > 200 { strongCache.removeAll() }
+        if cache.count > 500 { cache.removeAll() }
+    }
+
+    // MARK: Whole words added or removed
+
+    /// A fix that adds or drops a whole real word (คะ put in, ทำ left out) is not a typo fix: the writer's text
+    /// stays as typed. Rewrites (emoji, polite) add words on purpose and are left alone.
+    func guarded(_ reply: Reply, for segment: String) -> Reply {
+        guard !rewrites else { return reply }
+        let options = reply.options.filter { !Self.addsOrDropsWords(from: segment, to: $0) }
+        guard options.count != reply.options.count else { return reply }
+        Log.write("llm fix dropped: adds or removes words (\(reply.options.count - options.count) of \(reply.options.count))")
+        guard let first = options.first else { return Reply(fixed: segment, alternatives: [], unsure: reply.unsure) }
+        return Reply(fixed: first, alternatives: Array(options.dropFirst()), unsure: reply.unsure)
+    }
+
+    static func addsOrDropsWords(from original: String, to fixed: String) -> Bool {
+        guard original != fixed else { return false }
+        let d = Detector.shared
+        return WordLog.changedPairs(from: original, to: fixed).contains { p in
+            guard p.from.isEmpty != p.to.isEmpty else { return false }
+            let word = (p.from.isEmpty ? p.to : p.from).trimmingCharacters(in: .punctuationCharacters.union(.whitespaces))
+            guard !word.isEmpty else { return false }
+            if word.unicodeScalars.contains(where: KeyMap.isThai) { return Detector.thaiWords.contains(word) }
+            return word.count >= 2 && d.isEnglishWord(word)
         }
     }
 
@@ -556,6 +652,10 @@ final class LLMSuggester {
         if polite != .off { obj["polite"] = polite.rawValue }
         let hints = layoutHints(for: segment)
         if !hints.isEmpty { obj["layout_hints"] = hints }
+        // What the local check doubted, so the model looks hard at those words in context.
+        var suspects: [String] = []
+        for d in doubts(in: segment) where !suspects.contains(d.word) && suspects.count < 12 { suspects.append(d.word) }
+        if !suspects.isEmpty { obj["suspects"] = suspects }
         guard let data = try? JSONSerialization.data(withJSONObject: obj, options: .withoutEscapingSlashes), let str = String(data: data, encoding: .utf8) else {
             return segment
         }
@@ -581,7 +681,7 @@ final class LLMSuggester {
         Log.write("llm warm start (\(segment.unicodeScalars.count) keys, \(model.rawValue))")
         inFlightSegment = segment
         onStarted?(segment)
-        warm.send(Self.userMessage(for: segment, emoji: emojiMode, polite: polite), model: model) { [weak self] reply, error in
+        warm.send(Self.userMessage(for: segment, emoji: emojiMode, polite: polite), model: model) { [weak self] raw, error in
             guard let self = self else { return }
             self.inFlightSegment = nil
             defer { self.drainQueue() }
@@ -589,7 +689,7 @@ final class LLMSuggester {
                 Log.write("llm warm reply ignored (cancelled)")
                 return
             }
-            guard let reply = reply else {
+            guard let raw = raw else {
                 let msg = error ?? "error"
                 let loginProblem = Self.isLoginError(msg)
                 self.lastError = loginProblem
@@ -602,19 +702,11 @@ final class LLMSuggester {
                 return
             }
             self.noteCLISuccess()
+            let reply = self.guarded(raw, for: segment)
             self.lastError = nil
             self.lastLatency = Date().timeIntervalSince(started)
             Log.write(String(format: "llm warm reply in %.1fs, changed=%@, alternatives=%d, unsure=%@", self.lastLatency,
                              reply.fixed != segment ? "yes" : "no", reply.alternatives.count, reply.unsure ? "yes" : "no"))
-            if self.escalateIfUnsure.remove(segment) != nil, reply.unsure {
-                if self.canEscalate {
-                    Log.write("cascade: fast model unsure, asking the strong one")
-                    self.onEscalated?(segment)
-                    self.escalate(segment)
-                    return
-                }
-                Log.write("cascade: skipped, strong model busy")
-            }
             self.cache[segment] = reply
             if self.cache.count > 500 { self.cache.removeAll() }
             if reply.fixed != segment { self.onResult?(segment, reply) }
@@ -638,6 +730,9 @@ final class LLMSuggester {
         task = nil
         strongTask?.cancel()
         strongTask = nil
+        apiRequestID += 1
+        strongAPIID += 1
+        inFlightSegment = nil
         if let p = process, p.isRunning {
             Log.write("llm cli cancelled")
             p.terminate()
@@ -645,7 +740,7 @@ final class LLMSuggester {
         process = nil
         processID += 1
         warmRequestID += 1 // a warm reply still in flight will be ignored
-        escalateIfUnsure.removeAll()
+        strongRequestID += 1
         inFlightSegment = nil // so the same line asked again is queued, not assumed to be on its way
     }
 
@@ -660,6 +755,7 @@ final class LLMSuggester {
         cancel()
         warm.stop()
         warmStrong.stop()
+        warmShadow.stop()
     }
 
     /// The whole message: every line, without trailing blanks, at most maxSegmentKeys keystrokes.
@@ -692,7 +788,7 @@ final class LLMSuggester {
     /// (the held message is already glowing).
     private func request(_ segment: String, strong: Bool = false) {
         guard let apiKey = apiKey else { return }
-        let useModel = strong ? Self.strongModel : model
+        let useModel = strong ? strongModel : model
         var req = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -725,6 +821,8 @@ final class LLMSuggester {
         requestCount += 1
         let started = Date()
         let tag = strong ? "llm strong" : "llm api"
+        if strong { strongAPIID += 1 } else { apiRequestID += 1 }
+        let myID = strong ? strongAPIID : apiRequestID
 
         if strong {
             Log.write("llm strong start (\(segment.unicodeScalars.count) keys, \(useModel.rawValue), api)")
@@ -736,6 +834,7 @@ final class LLMSuggester {
         let t = session.dataTask(with: req) { [weak self] data, response, error in
             DispatchQueue.main.async {
                 guard let self = self else { return }
+                guard myID == (strong ? self.strongAPIID : self.apiRequestID) else { return } // replaced or cancelled
                 if strong {
                     self.strongTask = nil
                 } else {
@@ -747,7 +846,8 @@ final class LLMSuggester {
                     if failed { self.onFailed?(segment) }
                     self.drainQueue()
                 }
-                if let error = error as NSError?, error.code == NSURLErrorCancelled { return }
+                // A Ctrl+Enter replaced by a newer one is not a failed check.
+                if let error = error as NSError?, error.code == NSURLErrorCancelled { if strong { failed = false }; return }
                 guard let http = response as? HTTPURLResponse, let data = data else {
                     self.lastError = error?.localizedDescription ?? "network error"
                     Log.write("\(tag) error: \(self.lastError ?? "")")
@@ -775,12 +875,13 @@ final class LLMSuggester {
                     self.backoffUntil = Date().addingTimeInterval(10)
                     return
                 }
-                guard let reply = Self.parseReply(data) else {
+                guard let parsed = Self.parseReply(data) else {
                     self.lastError = "อ่านคำตอบไม่ได้"
                     Log.write("\(tag) unreadable reply")
                     return
                 }
                 failed = false
+                let reply = self.guarded(parsed, for: segment)
                 self.lastError = nil
                 let latency = Date().timeIntervalSince(started)
                 if strong {
@@ -789,18 +890,11 @@ final class LLMSuggester {
                     self.lastLatency = latency
                     Log.write(String(format: "llm api reply in %.1fs, changed=%@, alternatives=%d, unsure=%@", latency,
                                      reply.fixed != segment ? "yes" : "no", reply.alternatives.count, reply.unsure ? "yes" : "no"))
-                    if self.escalateIfUnsure.remove(segment) != nil, reply.unsure {
-                        if self.canEscalate {
-                            Log.write("cascade: fast model unsure, asking the strong one")
-                            self.onEscalated?(segment)
-                            self.escalate(segment)
-                            return
-                        }
-                        Log.write("cascade: skipped, strong model busy")
-                    }
                 }
-                self.cache[segment] = reply
-                if self.cache.count > 500 { self.cache.removeAll() }
+                if strong { self.storeStrong(segment, reply) } else {
+                    self.cache[segment] = reply
+                    if self.cache.count > 500 { self.cache.removeAll() }
+                }
                 if reply.fixed != segment { self.onResult?(segment, reply) }
                 self.onFinished?(segment, reply)
             }
@@ -821,7 +915,7 @@ final class LLMSuggester {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: path)
         proc.arguments = [
-            "-p", "--model", model == .haiku ? "haiku" : "opus",
+            "-p", "--model", model.cliName,
             "--effort", "low",
             "--output-format", "json",
             "--no-session-persistence", "--strict-mcp-config",

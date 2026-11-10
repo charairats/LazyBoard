@@ -384,3 +384,35 @@ final class Detector {
         return Double(covered) / Double(total)
     }
 }
+
+// MARK: After a layout switch
+
+extension Detector {
+    /// The word as it would have come out on the layout the writer just switched to (Caps Lock), or nil when that
+    /// reading is not believable. Real words in the old layout (caplock, ภาษา) are never converted.
+    static func intentConversion(_ word: String, wantThai: Bool) -> String? {
+        let d = Detector.shared
+        let scalars = Array(word.unicodeScalars)
+        guard scalars.count >= 2 else { return nil }
+        if wantThai {
+            guard scalars.allSatisfy(KeyMap.isMappableASCII), scalars.contains(where: { CharacterSet.letters.contains($0) }),
+                  !scalars.allSatisfy({ (0x30...0x39).contains($0.value) }) else { return nil }
+            if d.isEnglishWord(word) { return nil }
+            let thai = Array(KeyMap.convert(scalars, direction: .englishToThai).unicodeScalars)
+            let thaiCount = thai.filter(KeyMap.isThai).count
+            guard Double(thaiCount) / Double(thai.count) >= 0.8, ThaiOrtho.hasVowelOrTone(thai),
+                  ThaiOrtho.violations(thai) <= max(1, thai.count / 6) else { return nil }
+            let text = String(String.UnicodeScalarView(thai))
+            // An English-shaped word (letters only, vowels in place) must turn into real Thai to be taken.
+            if scalars.allSatisfy({ CharacterSet.letters.contains($0) }), looksEnglish(word), !isRealThai(text) { return nil }
+            return text
+        }
+        guard KeyMap.isThaiLayoutWord(scalars), !thaiWords.contains(word) else { return nil }
+        if ThaiOrtho.isValid(scalars) && isRealThai(word) { return nil }
+        let english = KeyMap.convert(scalars, direction: .thaiToEnglish)
+        guard english.range(of: "^[A-Za-z0-9][A-Za-z0-9'.-]*$", options: .regularExpression) != nil else { return nil }
+        let core = english.trimmingCharacters(in: CharacterSet(charactersIn: ".,'-"))
+        guard core.count >= 2, d.isEnglishWord(core) || looksEnglish(core) else { return nil }
+        return english
+    }
+}

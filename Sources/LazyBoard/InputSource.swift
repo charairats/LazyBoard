@@ -1,6 +1,13 @@
 import Carbon
 
 enum InputSource {
+    /// The layout in use now is Thai.
+    static func currentIsThai() -> Bool {
+        guard let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
+              let id = property(source, kTISPropertyInputSourceID) as? String else { return false }
+        return id.hasPrefix("com.apple.keylayout.Thai")
+    }
+
     /// Switch the active keyboard layout to Thai or to an English layout (ABC/US).
     static func select(thai: Bool) {
         let filter = [kTISPropertyInputSourceCategory as String: kTISCategoryKeyboardInputSource as String] as CFDictionary

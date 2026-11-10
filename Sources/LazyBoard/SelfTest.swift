@@ -301,6 +301,32 @@ enum SelfTest {
         expect("django ", nil)
         expect("canva ", nil)
 
+        print("\n== Caps Lock pressed, keys still on the old layout ==")
+        func intent(_ word: String, thai: Bool, _ want: String?) {
+            let got = Detector.intentConversion(word, wantThai: thai)
+            check("after switch: \(word) -> \(want ?? "kept")", got == want, "got \(got ?? "nil")")
+        }
+        // Jeen meant ไปหาตัวเล็กก่อน: the keys give ไปห่ที่ ตัสเล็กก่อน (two slips on top), which is all the layout
+        // can know; the right script then lets Claude fix the slips.
+        intent("wxsjmuj", thai: true, "ไปห่ที่")
+        intent("9ylg]Hddjvo", thai: true, "ตัสเล็กก่อน")
+        intent("หนืืำะ", thai: false, "sonnet")
+        intent("สสท", thai: false, "llm")
+        intent("caplock", thai: true, nil)
+        intent("hello", thai: true, nil)
+        intent("ภาษา", thai: false, nil)
+        intent("2026", thai: true, nil)
+
+        print("\n== Claude fixes that add or drop whole words ==")
+        check("adds คะ", LLMSuggester.addsOrDropsWords(from: "ได้เลย", to: "ได้เลยคะ"))
+        check("drops ทำ", LLMSuggester.addsOrDropsWords(from: "ไม่ได้ทำ แล้ว", to: "ไม่ได้ แล้ว"))
+        check("adds please", LLMSuggester.addsOrDropsWords(from: "send it", to: "please send it"))
+        check("spelling fix kept", !LLMSuggester.addsOrDropsWords(from: "สนับันนุน หน่อย", to: "สนับสนุน หน่อย"))
+        check("tone fix kept", !LLMSuggester.addsOrDropsWords(from: "ใช้ไมไ่ด้", to: "ใช้ไม่ได้"))
+        check("layout fix kept", !LLMSuggester.addsOrDropsWords(from: "dfl6j,g]p", to: "กดสุ่มเลย"))
+        check("English typo kept", !LLMSuggester.addsOrDropsWords(from: "concflict here", to: "conflict here"))
+        check("unchanged kept", !LLMSuggester.addsOrDropsWords(from: "โอเค", to: "โอเค"))
+
         print("\n\(failures == 0 ? "ALL PASSED" : "\(failures) FAILED")")
         return failures == 0 ? 0 : 1
     }

@@ -28,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     private let loginItem = NSMenuItem(title: "Open at Login", action: #selector(toggleLogin), keyEquivalent: "")
     private var backendItems: [NSMenuItem] = []
     private var modelItems: [NSMenuItem] = []
+    private var strongModelItems: [NSMenuItem] = []
     private var politeItems: [NSMenuItem] = []
     private var fixCount = 0
 
@@ -56,6 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         defaults.register(defaults: ["enabled": true, "switchLayout": true, "excluded": [String](),
                                      "autoFix": true, "holdOnEnter": true, "enterChecks": false, "checkWhileTyping": false, "emojiMode": false,
                                      "llmEnabled": true, "llmModel": LLMSuggester.Model.haiku.rawValue,
+                                     "strongModel": LLMSuggester.Model.sonnet.rawValue,
                                      "llmBackend": LLMSuggester.Backend.claudeCLI.rawValue])
         monitor.llm.backend = LLMSuggester.Backend(rawValue: defaults.string(forKey: "llmBackend") ?? "") ?? .claudeCLI
         monitor.isEnabled = defaults.bool(forKey: "enabled")
@@ -69,6 +71,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         monitor.excludedBundleIDs = Set(defaults.stringArray(forKey: "excluded") ?? [])
         monitor.llm.isEnabled = defaults.bool(forKey: "llmEnabled")
         monitor.llm.model = LLMSuggester.Model(rawValue: defaults.string(forKey: "llmModel") ?? "") ?? .haiku
+        monitor.llm.strongModel = LLMSuggester.Model(rawValue: defaults.string(forKey: "strongModel") ?? "") ?? .sonnet
         monitor.llm.apiKey = KeychainStore.read()
         Log.write("llm: backend \(monitor.llm.backend.rawValue), enabled \(monitor.llm.isEnabled), api key \(monitor.llm.apiKey == nil ? "none" : "saved"), claude cli \(LLMSuggester.claudePath == nil ? "missing" : "found")")
         monitor.onFix = { [weak self] s in
@@ -171,11 +174,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         connectionMenu.addItem(apiKeyItem)
         connectionMenu.addItem(.separator())
         connectionMenu.addItem(Self.header("Model"))
-        for model in LLMSuggester.Model.allCases {
+        for model in [LLMSuggester.Model.haiku, .opus] {
             let item = NSMenuItem(title: model == .haiku ? "Haiku 5.5 (fast, cheap)" : "Opus 5.5 (more accurate)", action: #selector(selectModel(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = model.rawValue
             modelItems.append(item)
+            connectionMenu.addItem(item)
+        }
+        connectionMenu.addItem(.separator())
+        connectionMenu.addItem(Self.header("Ctrl+Enter model"))
+        for model in [LLMSuggester.Model.sonnet, .opus] {
+            let item = NSMenuItem(title: model.title, action: #selector(selectStrongModel(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = model.rawValue
+            strongModelItems.append(item)
             connectionMenu.addItem(item)
         }
         connectionItem.submenu = connectionMenu
@@ -300,6 +312,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         for item in modelItems {
             item.state = (item.representedObject as? String) == llm.model.rawValue ? .on : .off
         }
+        for item in strongModelItems {
+            item.state = (item.representedObject as? String) == llm.strongModel.rawValue ? .on : .off
+        }
         apiKeyItem.title = llm.apiKey == nil ? "Set API Key…" : "Change API Key…  (saved)"
         connectionItem.title = "Connection: \(backendShort) · \(modelShort)"
 
@@ -324,7 +339,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     private var isBundled: Bool { Bundle.main.bundleURL.pathExtension == "app" }
 
     private var backendShort: String { monitor.llm.backend == .api ? "API key" : "Claude Code" }
-    private var modelShort: String { monitor.llm.model == .haiku ? "Haiku" : "Opus" }
+    private var modelShort: String { monitor.llm.model == .haiku ? "Haiku" : monitor.llm.model == .sonnet ? "Sonnet" : "Opus" }
 
     /// Full text of what stops Claude from working, or nil when it works (or is switched off on purpose).
     private var claudeProblem: String? {
@@ -482,6 +497,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         Log.write("llm: backend \(raw)")
         refreshMenuState()
         if backend == .api && monitor.llm.apiKey == nil { editAPIKey() }
+    }
+
+    @objc private func selectStrongModel(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let model = LLMSuggester.Model(rawValue: raw) else { return }
+        monitor.llm.strongModel = model
+        defaults.set(raw, forKey: "strongModel")
+        Log.write("llm: ctrl+enter model \(raw)")
+        refreshMenuState()
     }
 
     @objc private func selectModel(_ sender: NSMenuItem) {

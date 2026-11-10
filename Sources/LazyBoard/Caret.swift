@@ -184,26 +184,28 @@ enum Caret {
 
     /// The text of the focused field up to the caret, when the caret sits at the very end of the text
     /// (so deleting backwards from it is safe). Only the last line is returned. nil when unknown.
-    static func focusedLineAtEnd() -> String? {
-        guard let element = focusedElement() else { Log.write("ax: no focused element"); return nil }
+    /// `log`: say why the line could not be read (off for the quiet reads while typing).
+    static func focusedLineAtEnd(log: Bool = true) -> String? {
+        let note = { (s: String) in if log { Log.write(s) } }
+        guard let element = focusedElement() else { note("ax: no focused element"); return nil }
         guard let valueRef = axValue(element, kAXValueAttribute), let text = valueRef as? String, !text.isEmpty else {
             var roleRef: CFTypeRef?
             AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef)
-            Log.write("ax: no text value (role \((roleRef as? String) ?? "?"))")
+            note("ax: no text value (role \((roleRef as? String) ?? "?"))")
             return nil
         }
         guard let rangeRef = axValue(element, kAXSelectedTextRangeAttribute), CFGetTypeID(rangeRef) == AXValueGetTypeID() else {
-            Log.write("ax: no selection range")
+            note("ax: no selection range")
             return nil
         }
         var range = CFRange()
-        guard AXValueGetValue(rangeRef as! AXValue, .cfRange, &range), range.length == 0 else { Log.write("ax: selection not collapsed"); return nil }
+        guard AXValueGetValue(rangeRef as! AXValue, .cfRange, &range), range.length == 0 else { note("ax: selection not collapsed"); return nil }
         let utf16 = Array(text.utf16)
         // Some fields report a trailing newline that is not really there; tolerate it.
         var end = utf16.count
         while end > 0, utf16[end - 1] == 0x0A || utf16[end - 1] == 0x0D { end -= 1 }
         guard range.location == end || range.location == utf16.count else {
-            Log.write("ax: caret not at end (\(range.location)/\(utf16.count))")
+            note("ax: caret not at end (\(range.location)/\(utf16.count))")
             return nil
         }
         var start = end

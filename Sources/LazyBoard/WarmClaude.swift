@@ -33,7 +33,7 @@ final class WarmClaude {
         p.executableURL = URL(fileURLWithPath: path)
         p.arguments = [
             "-p", "--verbose",
-            "--model", model == .haiku ? "haiku" : "opus",
+            "--model", model.cliName,
             "--effort", "low",
             "--input-format", "stream-json",
             "--output-format", "stream-json",
