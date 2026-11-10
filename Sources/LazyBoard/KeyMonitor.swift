@@ -331,7 +331,7 @@ final class KeyMonitor {
         var modified = flags.contains(.maskCommand) || flags.contains(.maskControl) || flags.contains(.maskAlternate)
         /// This Enter asks Claude to check the message before it goes.
         var review = false
-        /// A plain Enter (no modifier) in Ctrl+Enter mode: it sends at once unless the local check doubts a word.
+        /// A plain Enter (no modifier) in Ctrl+Enter mode: it always goes out at once, never held.
         var plainEnter = false
 
         if keyCode == kVK_Return || keyCode == kVK_ANSI_KeypadEnter {
@@ -446,6 +446,29 @@ final class KeyMonitor {
                 apply(s, automatic: true)
                 fixedFirst = true
             }
+            // Plain Enter is never held, swallowed or slowed: Ctrl+Enter is the way to ask for a check.
+            // Only a confident layout fix (above, done locally and at once) goes in first. A fix Claude
+            // already showed stays a suggestion: Enter means the writer chose to send as typed.
+            if plainEnter && !review {
+                let segment = LLMSuggester.segment(of: buffer)
+                if segment.unicodeScalars.count >= Self.holdMinimumKeys {
+                    let showing = suggestion?.source == .llm ? ", fix was showing" : ""
+                    Log.write("enter sent: plain (\(segment.unicodeScalars.count) keys\(showing))")
+                    if llm.isReady, !llm.rewrites, !llm.isChecked(segment) {
+                        // Off the key path: the check runs after the Enter is already on its way.
+                        DispatchQueue.main.async { [weak self] in self?.shadowCheck(segment) }
+                    }
+                }
+                if fixedFirst {
+                    // Deliver the Enter after the replacement, in order.
+                    let source = CGEventSource(stateID: .combinedSessionState)
+                    postKey(keyCode, source, flags: flags)
+                    reset()
+                    return nil
+                }
+                reset()
+                return passThrough
+            }
             // A fix from the quiet check is on screen: do not send over it. Tab fixes, Enter again sends.
             if let s = suggestion, s.source == .llm, holdOnEnter {
                 hold = Hold(keyCode: keyCode, flags: flags, segment: LLMSuggester.segment(of: buffer), started: Date(), decided: true, decidedAt: Date())
@@ -453,7 +476,7 @@ final class KeyMonitor {
                 showFix(original: s.original, options: [s.replacement], selected: 0, hint: "⇥ fix · ↩ send as is · esc")
                 return nil
             }
-            if holdOnEnter, llm.isReady, review || plainEnter || llm.rewrites {
+            if holdOnEnter, llm.isReady, review || llm.rewrites {
                 let enterStart = Date()
                 // The buffer forgets text after a mouse click or arrow key; the field itself does not.
                 // Only the line the caret is on: the field can hold a whole document or terminal scrollback.
@@ -476,16 +499,7 @@ final class KeyMonitor {
                     mustCheck = true
                 } else {
                     doubts = LLMSuggester.doubts(in: segment)
-                    if plainEnter && !review {
-                        // Plain Enter: out at once when every word is real; a doubted word waits for the fast model.
-                        if doubts.isEmpty {
-                            Log.write("enter sent: plain (\(segment.unicodeScalars.count) keys, 0 doubted)")
-                            shadowCheck(segment)
-                        } else {
-                            Log.write("hold why: plain, \(doubts.count) doubted")
-                            mustCheck = true
-                        }
-                    } else if !enterChecks {
+                    if !enterChecks {
                         // Ctrl+Enter: the writer asked, so Claude checks whatever the local check thinks.
                         Log.write("hold why: asked" + (doubts.isEmpty ? "" : ", \(doubts.count) doubted"))
                         mustCheck = true
