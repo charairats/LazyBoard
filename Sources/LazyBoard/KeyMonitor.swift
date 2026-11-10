@@ -53,6 +53,12 @@ final class KeyMonitor {
     var enterChecks = false
     /// Also ask Claude quietly whenever typing pauses (off: the whole sentence is checked only at Enter).
     var checkWhileTyping = false
+    /// A word that looks off (mixed scripts, ภาาษา) just ended: the next space sends the line to the fast model quietly.
+    private var quietCheckDue = false
+    /// The segment of the quiet check in flight: no loading dots for it.
+    private var quietSegment: String?
+    /// Claude's fix without the text typed after the checked segment, so it can follow the typing.
+    private var llmBase: (original: String, options: [String])?
     private struct Hold {
         let keyCode: Int
         let flags: CGEventFlags
@@ -103,8 +109,8 @@ final class KeyMonitor {
             }
             self.showLLMResult(original: original, reply: reply)
         }
-        llm.onStarted = { [weak self] _ in
-            guard let self = self, self.suggestion == nil, self.cycle == nil, !self.panel.isLoading else { return }
+        llm.onStarted = { [weak self] segment in
+            guard let self = self, segment != self.quietSegment, self.suggestion == nil, self.cycle == nil, !self.panel.isLoading else { return }
             self.panel.showLoading(near: Caret.anchorPoint())
         }
         llm.onFinished = { [weak self] original, reply in
@@ -297,6 +303,9 @@ final class KeyMonitor {
         cycle = nil
         lastAuto = nil
         hold = nil
+        quietCheckDue = false
+        quietSegment = nil
+        llmBase = nil
         llm.cancel()
         panel.hide()
     }
@@ -322,6 +331,8 @@ final class KeyMonitor {
         var modified = flags.contains(.maskCommand) || flags.contains(.maskControl) || flags.contains(.maskAlternate)
         /// This Enter asks Claude to check the message before it goes.
         var review = false
+        /// A plain Enter (no modifier) in Ctrl+Enter mode: it sends at once unless the local check doubts a word.
+        var plainEnter = false
 
         if keyCode == kVK_Return || keyCode == kVK_ANSI_KeypadEnter {
             let ctrlOnly = flags.contains(.maskControl) && !flags.contains(.maskCommand) && !flags.contains(.maskAlternate)
@@ -332,6 +343,7 @@ final class KeyMonitor {
                 review = true
             } else if !modified && !flags.contains(.maskShift) {
                 review = enterChecks
+                plainEnter = !enterChecks
             }
             // With Enter checking, Ctrl+Enter sends exactly what was typed, no check, no fix (passwords, links, code).
             if ctrlOnly && enterChecks {
@@ -441,7 +453,7 @@ final class KeyMonitor {
                 showFix(original: s.original, options: [s.replacement], selected: 0, hint: "⇥ fix · ↩ send as is · esc")
                 return nil
             }
-            if holdOnEnter, llm.isReady, review || llm.rewrites {
+            if holdOnEnter, llm.isReady, review || plainEnter || llm.rewrites {
                 let enterStart = Date()
                 // The buffer forgets text after a mouse click or arrow key; the field itself does not.
                 // Only the line the caret is on: the field can hold a whole document or terminal scrollback.
@@ -464,7 +476,16 @@ final class KeyMonitor {
                     mustCheck = true
                 } else {
                     doubts = LLMSuggester.doubts(in: segment)
-                    if !enterChecks {
+                    if plainEnter && !review {
+                        // Plain Enter: out at once when every word is real; a doubted word waits for the fast model.
+                        if doubts.isEmpty {
+                            Log.write("enter sent: plain (\(segment.unicodeScalars.count) keys, 0 doubted)")
+                            shadowCheck(segment)
+                        } else {
+                            Log.write("hold why: plain, \(doubts.count) doubted")
+                            mustCheck = true
+                        }
+                    } else if !enterChecks {
                         // Ctrl+Enter: the writer asked, so Claude checks whatever the local check thinks.
                         Log.write("hold why: asked" + (doubts.isEmpty ? "" : ", \(doubts.count) doubted"))
                         mustCheck = true
@@ -485,7 +506,7 @@ final class KeyMonitor {
                     let fieldRead = Date()
                     panel.showLoading(near: Caret.anchorPoint())
                     let bubbleShown = Date()
-                    llm.checkNow(buffer)
+                    llm.checkNow(buffer, escalate: review && !enterChecks)
                     Log.write("hold enter (\(segment.unicodeScalars.count) keys)")
                     if Date().timeIntervalSince(enterStart) >= 0.15 {
                         Log.write(String(format: "enter slow: field %.2fs, bubble %.2fs, request %.2fs",
@@ -497,7 +518,7 @@ final class KeyMonitor {
             }
             if !holdOnEnter { Log.write("enter sent: hold off") }
             else if !llm.isReady { Log.write("enter sent: llm not ready") }
-            else if !review {
+            else if !review && !plainEnter {
                 // Plain Enter: out it goes. Opus reads it afterwards, to count how often Ctrl+Enter would have helped.
                 let segment = LLMSuggester.segment(of: buffer)
                 if segment.unicodeScalars.count >= Self.holdMinimumKeys {
@@ -566,6 +587,8 @@ final class KeyMonitor {
                 } else if autoFixLayout, let s = thaiTypoCandidate() {
                     Log.write("auto thai typo fix on space (\(s.scalarCount) keys)")
                     apply(s, automatic: true)
+                } else {
+                    quietCheckOnSpace()
                 }
             }
             return passThrough
@@ -592,6 +615,43 @@ final class KeyMonitor {
             return nil
         }
         return passThrough
+    }
+
+    /// Space after a word that looks off (mixed scripts, unknown Thai such as ภาาษา): remember it, and on the
+    /// next space (one more word of context) ask the fast model quietly. Its fix waits for Tab; Enter will not send over it.
+    private func quietCheckOnSpace() {
+        guard llm.isReady, !llm.rewrites, suggestion == nil, cycle == nil, hold == nil else { return }
+        if quietCheckDue {
+            quietCheckDue = false
+            if let segment = llm.checkQuiet(buffer) {
+                quietSegment = segment
+                Log.write("quiet check on space (\(segment.unicodeScalars.count) keys)")
+            }
+            return
+        }
+        let line = String(String.UnicodeScalarView(buffer.unicodeScalars.dropLast()))
+        guard !line.hasSuffix(" "), let word = line.split(whereSeparator: { $0 == " " || $0 == "\n" }).last else { return }
+        let doubts = LLMSuggester.doubts(in: String(word))
+        guard !doubts.isEmpty else { return }
+        quietCheckDue = true
+        Log.write("odd word on space (" + doubts.map { $0.why.rawValue }.joined(separator: ", ") + ")")
+    }
+
+    /// Claude's fix set against the buffer as it is now: the checked segment may be followed by more typing,
+    /// which the fix carries along unchanged. Nil when the segment is no longer in the line.
+    private func llmSuggestion(original: String, options base: [String]) -> Suggestion? {
+        let scalars = Array(buffer.unicodeScalars)
+        let orig = Array(original.unicodeScalars)
+        guard orig.count <= scalars.count else { return nil }
+        var start = scalars.count - orig.count
+        while start >= 0, Array(scalars[start..<(start + orig.count)]) != orig { start -= 1 }
+        guard start >= 0 else { return nil }
+        let extra = String(String.UnicodeScalarView(scalars[(start + orig.count)...]))
+        guard !extra.contains("\n") else { return nil }
+        let options = base.map { $0 + extra }
+        return Suggestion(scalarCount: orig.count + extra.unicodeScalars.count,
+                          replacement: options[0], direction: nil, source: .llm,
+                          alternatives: Array(options.dropFirst()), original: original + extra)
     }
 
     /// The word just finished (buffer ends with one space), spelled with a classic Thai slip.
@@ -649,7 +709,12 @@ final class KeyMonitor {
         if next == nil {
             // Nothing layout-related: let the LLM layer look after a pause, if asked to.
             if checkWhileTyping { llm.textChanged(buffer) }
-            if suggestion?.source == .llm { suggestion = nil; panel.hide() }
+            if suggestion?.source == .llm {
+                // A quiet fix follows the typing until Tab, Enter or the line changes under it.
+                if let base = llmBase, let s = llmSuggestion(original: base.original, options: base.options) {
+                    suggestion = s
+                } else { suggestion = nil; llmBase = nil; panel.hide() }
+            }
             else if suggestion != nil { suggestion = nil; panel.hide() }
             return
         }
@@ -670,17 +735,31 @@ final class KeyMonitor {
         // The user may have typed on since the request went out: the segment must still end the buffer
         // (ignoring trailing spaces), or the result is stale.
         guard cycle == nil else { return }
+        if original == quietSegment { quietSegment = nil }
+        // A held Enter needs the segment to still end the line; a quiet check may have been typed past.
         let trailing = trailingBlanks()
-        let scalars = Array(buffer.unicodeScalars.dropLast(trailing.unicodeScalars.count))
-        let orig = Array(original.unicodeScalars)
-        guard orig.count <= scalars.count, Array(scalars[(scalars.count - orig.count)...]) == orig else {
-            Log.write("llm result stale, dropped")
-            return
-        }
-        let options = reply.options.map { $0 + trailing }
-        let s = Suggestion(scalarCount: orig.count + trailing.unicodeScalars.count,
+        let s: Suggestion
+        if hold != nil, hold!.segment == original {
+            let scalars = Array(buffer.unicodeScalars.dropLast(trailing.unicodeScalars.count))
+            let orig = Array(original.unicodeScalars)
+            guard orig.count <= scalars.count, Array(scalars[(scalars.count - orig.count)...]) == orig else {
+                Log.write("llm result stale, dropped")
+                return
+            }
+            let options = reply.options.map { $0 + trailing }
+            s = Suggestion(scalarCount: orig.count + trailing.unicodeScalars.count,
                            replacement: options[0], direction: nil, source: .llm,
                            alternatives: Array(options.dropFirst()), original: original)
+            llmBase = nil
+        } else {
+            guard let fresh = llmSuggestion(original: original, options: reply.options) else {
+                Log.write("llm result stale, dropped")
+                return
+            }
+            s = fresh
+            llmBase = (original, reply.options)
+        }
+        let options = [s.replacement] + s.alternatives
         suggestion = s
         Log.write("llm suggestion (\(s.scalarCount) keys, \(options.count) options)")
         if hold != nil, hold!.segment == original {

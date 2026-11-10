@@ -189,6 +189,15 @@ enum SelfTest {
         let slip = LLMSuggester.doubts(in: "ขอความแม่นเพิ่ม แลกกับเสลานิดหน่อยเราว่าคุ้มนะ")
         check("doubt: real word one key from a common one", slip.contains { $0.word == "เสลา" && $0.why == .nearCommon }, "\(slip)")
         check("common words are not near-common", LLMSuggester.commonNeighbour(of: "เวลา") == nil)
+        // Odd fragments that start a quiet check on the next space (2026-11-04).
+        for s in ["สฟ", "สเ", "าส", "ภาาษา", "lllflfu8tj"] {
+            check("odd word doubted: \(s)", !LLMSuggester.doubts(in: s).isEmpty, "\(LLMSuggester.doubts(in: s))")
+        }
+        let chat = LLMSuggester.doubts(in: "สวัสดีค่ะ ดีงับ dja ดีค้าบ")
+        check("chat slang fine, only dja is odd", chat.map(\.word) == ["dja"], "\(chat)")
+        check("slipped key doubted: ใก้ใช้ (ห -> ก)", !LLMSuggester.doubts(in: "แก้ ใก้ใช้ หน่อย").isEmpty, "\(LLMSuggester.doubts(in: "แก้ ใก้ใช้ หน่อย"))")
+        check("real word not doubted as a layout slip: หน่อย", LLMSuggester.doubts(in: "แก้ไขหน่อย หน่อย").isEmpty, "\(LLMSuggester.doubts(in: "แก้ไขหน่อย หน่อย"))")
+        check("whole word not doubted: สเตตัส", LLMSuggester.doubts(in: "สเตตัส").isEmpty, "\(LLMSuggester.doubts(in: "สเตตัส"))")
         // Found while testing in chat on 2026-11-03.
         let review = d.suggest(buffer: "ส่ง PR แล้วนะ รอ พำรำรไ ")
         check("รอ stays Thai beside a mistyped English word", review?.replacement == "reieiw " && review?.scalarCount == 7,
