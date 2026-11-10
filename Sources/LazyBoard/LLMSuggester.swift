@@ -82,7 +82,7 @@ final class LLMSuggester {
     var onStarted: ((String) -> Void)?
     private(set) var inFlightSegment: String?
     /// Human readable state for the menu.
-    private(set) var lastError: String?
+    var lastError: String?
     private(set) var requestCount = 0
     private(set) var lastLatency: TimeInterval = 0
 
@@ -199,7 +199,7 @@ final class LLMSuggester {
 
     /// Check right now (no debounce), e.g. when Enter is held back. Returns the segment being checked.
     @discardableResult
-    func checkNow(_ buffer: String) -> String? {
+    func checkNow(_ buffer: String, escalate: Bool = false) -> String? {
         pending?.cancel()
         pending = nil
         guard isReady else { return nil }
@@ -212,7 +212,29 @@ final class LLMSuggester {
             }
             return segment
         }
-        if model != Self.strongModel { escalateIfUnsure.insert(segment) }
+        // Haiku -> Opus only when the writer asked for it (Ctrl+Enter).
+        if escalate, model != Self.strongModel { escalateIfUnsure.insert(segment) }
+        if isBusy {
+            if inFlightSegment != segment { queuedSegment = segment }
+            return segment
+        }
+        start(segment)
+        return segment
+    }
+
+    /// Quiet check after an odd word: the fast model only, at once, no cascade. Returns the segment sent.
+    @discardableResult
+    func checkQuiet(_ buffer: String) -> String? {
+        pending?.cancel()
+        pending = nil
+        guard isReady, Date() >= backoffUntil else { return nil }
+        let segment = Self.segment(of: buffer)
+        guard segment.unicodeScalars.count >= 6 else { return nil }
+        if let reply = cache[segment] {
+            if reply.fixed != segment { onResult?(segment, reply) }
+            return nil
+        }
+        escalateIfUnsure.remove(segment)
         if isBusy {
             if inFlightSegment != segment { queuedSegment = segment }
             return segment
@@ -355,7 +377,8 @@ final class LLMSuggester {
                 // Real Thai whose keys spell nothing English (แก้ใน -> cdh.o) is just Thai; หแพรยะ -> script is not.
                 let core = hint.trimmingCharacters(in: CharacterSet(charactersIn: ".,'-"))
                 guard token.unicodeScalars.allSatisfy(KeyMap.isThai), Detector.isRealThai(token), !d.isEnglishWord(core),
-                      !(core.count >= 5 && core.allSatisfy(\.isLetter) && Detector.looksEnglish(core)) else {
+                      // A whole dictionary word (หน่อย -> sojvp) is Thai even when its keys look English-shaped.
+                      Detector.thaiWords.contains(token) || !(core.count >= 5 && core.allSatisfy(\.isLetter) && Detector.looksEnglish(core)) else {
                     found.append((token, .layout))
                     continue
                 }
@@ -508,9 +531,12 @@ final class LLMSuggester {
             }
             guard let reply = reply else {
                 let msg = error ?? "error"
-                self.lastError = String(msg.prefix(160))
+                let loginProblem = msg.contains("logged in") || msg.contains("authenticate") || msg.contains("OAuth") || msg.contains("/login")
+                self.lastError = loginProblem
+                    ? "Claude Code login หมดอายุ: รัน claude ใน Terminal แล้ว /login หรือใช้ API key แทน"
+                    : String(msg.prefix(160))
                 Log.write("llm warm error: \(msg.prefix(200))")
-                self.backoffUntil = Date().addingTimeInterval(msg.contains("logged in") ? 60 : 10)
+                self.backoffUntil = Date().addingTimeInterval(loginProblem ? 60 : 10)
                 self.onFailed?(segment)
                 return
             }
@@ -647,7 +673,13 @@ final class LLMSuggester {
                 if let error = error as NSError?, error.code == NSURLErrorCancelled { return }
                 guard let http = response as? HTTPURLResponse, let data = data else {
                     self.lastError = error?.localizedDescription ?? "network error"
+                    Log.write("llm api error: \(self.lastError ?? "")")
                     return
+                }
+                if http.statusCode != 200 {
+                    // The API's own error message, never the typed text.
+                    let apiMessage = ((try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? [String: Any])?["message"] as? String ?? ""
+                    Log.write("llm api HTTP \(http.statusCode): \(apiMessage.prefix(200))")
                 }
                 switch http.statusCode {
                 case 200:
