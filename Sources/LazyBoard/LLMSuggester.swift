@@ -569,6 +569,59 @@ final class LLMSuggester {
         Log.write("cli: available again")
     }
 
+    private var probing = false
+    private var lastProbeOK: Bool?
+
+    /// Ask the CLI whether it is signed in (`claude auth status`: no model call, nothing billed) and update the flag.
+    /// Run when the menu opens, every minute while the CLI is flagged, and from the menu's warning line.
+    func probeCLI(_ done: ((Bool) -> Void)? = nil) {
+        guard isEnabled, let path = Self.claudePath, !probing else { done?(false); return }
+        probing = true
+        DispatchQueue.global(qos: .utility).async {
+            let ok = Self.cliSignedIn(path)
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.probing = false
+                if ok {
+                    if self.cliSignedOut { Log.write("cli: probe says signed in") }
+                    self.noteCLISuccess()
+                    if let e = self.lastError, Self.isLoginError(e) || e.contains("login") { self.lastError = nil }
+                } else {
+                    if self.lastProbeOK != false { Log.write("cli: probe says signed out") }
+                    self.cliSignedOut = true
+                }
+                self.lastProbeOK = ok
+                done?(ok)
+            }
+        }
+    }
+
+    /// `claude auth status` prints JSON with "loggedIn". Same environment as the real requests.
+    static func cliSignedIn(_ path: String) -> Bool {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = ["auth", "status"]
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("lazyboard-cli", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        p.currentDirectoryURL = dir
+        var env = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("CLAUDE") && !$0.key.hasPrefix("ANTHROPIC") }
+        env["PATH"] = (env["PATH"] ?? "") + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+        p.environment = env
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        p.standardInput = FileHandle.nullDevice
+        do { try p.run() } catch { return false }
+        let killer = DispatchWorkItem { if p.isRunning { p.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 10, execute: killer)
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        killer.cancel()
+        guard let text = String(data: data, encoding: .utf8), let start = text.firstIndex(of: "{"), let end = text.lastIndex(of: "}"),
+              let obj = try? JSONSerialization.jsonObject(with: Data(text[start...end].utf8)) as? [String: Any] else { return false }
+        return obj["loggedIn"] as? Bool ?? false
+    }
+
     /// Menu Retry: try the CLI again.
     func resetCLIHealth() {
         cliFailures = 0

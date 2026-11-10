@@ -10,6 +10,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     // Menu items. Titles are set in buildStatusItem / refreshMenuState.
     private let statusLine = NSMenuItem(title: "Starting…", action: nil, keyEquivalent: "")
     private let claudeLine = NSMenuItem(title: "", action: #selector(fixClaude), keyEquivalent: "")
+    /// Grey note: the after-send check (CLI only) is off, while the checks in use (API) work.
+    private let shadowLine = NSMenuItem(title: "After-send check: off (CLI signed out)", action: nil, keyEquivalent: "")
+    private var probeTimer: Timer?
     private let enabledItem = NSMenuItem(title: "Enabled", action: #selector(toggleEnabled), keyEquivalent: "")
     private let excludeItem = NSMenuItem(title: "Disable in This App", action: #selector(toggleExclude), keyEquivalent: "")
     private let autoFixItem = NSMenuItem(title: "Auto-Fix on Space / Enter  (Esc to undo)", action: #selector(toggleAutoFix), keyEquivalent: "")
@@ -122,6 +125,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         menu.addItem(statusLine)
         claudeLine.target = self
         menu.addItem(claudeLine)
+        shadowLine.toolTip = "The after-send check uses the Claude CLI. Run claude in Terminal, type /login; LazyBoard notices within a minute."
+        menu.addItem(shadowLine)
         menu.addItem(.separator())
 
         // 2. On/off.
@@ -206,6 +211,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         refreshMenuState()
         // Claude errors arrive in the background: keep the icon in step without waiting for the menu to open.
         iconTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.updateIcon() }
+        // While the CLI is flagged signed out, look again every minute (auth status only, no model call).
+        probeTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            guard let self = self, self.monitor.llm.cliSignedOut else { return }
+            self.monitor.llm.probeCLI { _ in self.refreshMenuState() }
+        }
+        monitor.llm.probeCLI { [weak self] _ in self?.refreshMenuState() }
     }
 
     private func add(_ items: [NSMenuItem], to menu: NSMenu) {
@@ -230,6 +241,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     /// Greys out what cannot work right now, instead of hiding it.
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         if item === claudeLine { return claudeProblem != nil }
+        if item === shadowLine { return false }
         let needsClaude = item === quietItem || item.menu === sendCheckMenu || item.menu === rewriteMenu
         if needsClaude { return monitor.isEnabled && monitor.llm.isEnabled }
         if item === autoFixItem || item === switchItem || item === llmItem || item === excludeItem { return monitor.isEnabled }
@@ -277,6 +289,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
 
     func menuWillOpen(_ menu: NSMenu) {
         refreshMenuState()
+        monitor.llm.probeCLI { [weak self] _ in self?.refreshMenuState() }
     }
 
     private var sendCheck: SendCheck {
@@ -348,8 +361,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         if llm.backend == .api && llm.apiKey == nil { return "No API key set" }
         if llm.backend == .claudeCLI && LLMSuggester.claudePath == nil { return "claude command not found (install Claude Code, or use an API key)" }
         if let err = llm.lastError { return Self.englishError(err) }
-        // The after-send check always uses the CLI, so a signed-out CLI matters on the API backend too.
-        if llm.cliSignedOut { return "CLI signed out, run claude then /login" }
+        // On the API backend a signed-out CLI only stops the after-send check: a grey line, not a warning.
+        if llm.cliSignedOut && llm.backend == .claudeCLI { return "CLI signed out, run claude then /login" }
         return nil
     }
 
@@ -374,6 +387,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             statusLine.title = "LazyBoard: On" + (fixCount == 0 ? "" : " · \(fixCount) fixes")
         }
         let llm = monitor.llm
+        shadowLine.isHidden = !(llm.isEnabled && llm.backend == .api && llm.cliSignedOut && LLMSuggester.claudePath != nil)
         if let problem = claudeProblem {
             // Keep the menu narrow: a short line here, the full text on click and in the tooltip.
             var short = problem.components(separatedBy: CharacterSet(charactersIn: ":(\n")).first?
@@ -396,10 +410,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     @objc private func fixClaude() {
         guard let problem = claudeProblem else { return }
         if monitor.llm.backend == .api && monitor.llm.apiKey == nil { editAPIKey(); return }
+        if monitor.llm.cliSignedOut {
+            // Look first: if the CLI is signed in by now, there is nothing to ask.
+            monitor.llm.probeCLI { [weak self] ok in
+                guard let self = self else { return }
+                if ok { self.refreshMenuState() } else { self.showClaudeAlert(problem + " (checked just now)") }
+            }
+            return
+        }
+        showClaudeAlert(problem)
+    }
+
+    private func showClaudeAlert(_ problem: String) {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = "Claude isn't working"
-        alert.informativeText = problem + "\n\nTo fix: set a Claude API key (LazyBoard switches to it), or run claude in Terminal, type /login, then press Retry."
+        alert.informativeText = problem + "\n\nTo fix: set a Claude API key (LazyBoard switches to it), or run claude in Terminal and type /login. LazyBoard checks the CLI again every minute."
         alert.addButton(withTitle: "Set API Key…")
         alert.addButton(withTitle: "Retry")
         alert.addButton(withTitle: "Close")
