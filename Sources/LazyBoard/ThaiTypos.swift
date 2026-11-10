@@ -19,7 +19,8 @@ enum ThaiTypos {
     static let khaEndings = ["นะ", "มั้ย", "ไหม", "หรอ", "เหรอ", "หรือ", "หรือเปล่า", "รึเปล่า"]
 
     /// A corrected spelling for `word`, or nil when nothing confident applies.
-    static func fix(_ word: String) -> String? {
+    /// `slips`: also try one Shift or swap slip (for the fix on space; the doubt check reports pieces instead).
+    static func fix(_ word: String, slips: Bool = true) -> String? {
         guard word.unicodeScalars.contains(where: KeyMap.isThai) else { return nil }
         var fixed = word
         // เเ (two sara e) is always แ.
@@ -45,6 +46,47 @@ enum ThaiTypos {
         if khaEndings.contains(where: { fixed.hasSuffix($0 + "ค่ะ") }) {
             fixed = String(fixed.dropLast("ค่ะ".count)) + "คะ"
         }
+        if slips, fixed == word, let slip = slipFix(word) { return slip }
         return fixed == word ? nil : fixed
+    }
+
+    /// Each Thai character and the one on the same key with or without Shift (ื and ์ share a key).
+    static let shiftPartner: [Unicode.Scalar: Unicode.Scalar] = {
+        let plain = Array("`1234567890-=qwertyuiop[]\\asdfghjkl;'zxcvbnm,./".unicodeScalars)
+        let shifted = Array("~!@#$%^&*()_+QWERTYUIOP{}|ASDFGHJKL:\"ZXCVBNM<>?".unicodeScalars)
+        var map: [Unicode.Scalar: Unicode.Scalar] = [:]
+        for (p, s) in zip(plain, shifted) {
+            guard let a = KeyMap.usToThai[p], let b = KeyMap.usToThai[s], KeyMap.isThai(a), KeyMap.isThai(b) else { continue }
+            map[a] = b
+            map[b] = a
+        }
+        return map
+    }()
+
+    /// A Thai word that is not real, one slip away from exactly one real spelling: Shift missed or added on one key
+    /// (สัตวื -> สัตว์), or two neighbouring characters swapped (ไมไ่ด้ -> ไม่ได้). Nil when unsure.
+    static func slipFix(_ word: String) -> String? {
+        let scalars = Array(word.unicodeScalars)
+        guard scalars.count >= 3, scalars.allSatisfy(KeyMap.isThai) else { return nil }
+        if ThaiOrtho.isValid(scalars) && Detector.isRealThai(word) { return nil }
+        var found = Set<String>()
+        func consider(_ c: [Unicode.Scalar]) {
+            guard ThaiOrtho.isValid(c) else { return }
+            let text = String(String.UnicodeScalarView(c))
+            if text != word, Detector.isRealThai(text) { found.insert(text) }
+        }
+        for i in scalars.indices {
+            if let other = shiftPartner[scalars[i]] {
+                var c = scalars
+                c[i] = other
+                consider(c)
+            }
+            if i + 1 < scalars.count, scalars[i] != scalars[i + 1] {
+                var c = scalars
+                c.swapAt(i, i + 1)
+                consider(c)
+            }
+        }
+        return found.count == 1 ? found.first : nil
     }
 }

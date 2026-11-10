@@ -327,6 +327,29 @@ enum SelfTest {
         check("English typo kept", !LLMSuggester.addsOrDropsWords(from: "concflict here", to: "conflict here"))
         check("unchanged kept", !LLMSuggester.addsOrDropsWords(from: "โอเค", to: "โอเค"))
 
+        print("\n== One slipped key, fixed locally ==")
+        func slipCase(_ word: String, _ want: String?) {
+            let got = ThaiTypos.slipFix(word)
+            check("slip: \(word) -> \(want ?? "kept")", got == want, "got \(got ?? "nil")")
+        }
+        slipCase("อาจารยื", "อาจารย์")
+        slipCase("จุดประสงคื", "จุดประสงค์")
+        slipCase("ใช้ไมไ่ด้", "ใช้ไม่ได้")
+        slipCase("ต้องากร", "ต้องการ")
+        slipCase("ภาษา", nil)
+        slipCase("ขอบคุณ", nil)
+
+        print("\n== Not doubted: numbers, names, real Thai, drawn-out chat ==")
+        for text in ["1:1", "10000", "3.1415", "BTC", "ABCD&P500E", "userOnboarded", "gRPC", "microservice",
+                     "feature/add-user-login-page", "ทำได้", "สั้นๆ", "ก็ฟรี", "แอปนี้ดี", "อันนี้หรอ", "ถ้าทำกะ",
+                     "อะไรเงี้ย", "ฮ๊าาา", "ง๊าบบบ", "แงงๆๆ", "บอท", "ขาลง", "เช่น", "เลข"] {
+            let found = LLMSuggester.doubts(in: text)
+            check("fine: \(text)", found.isEmpty, found.map { "\($0.word) (\($0.why.rawValue))" }.joined(separator: ", "))
+        }
+        for text in ["mujgdujp;-hv'", "หแพรยะ", "ภาาษา"] {
+            check("still doubted: \(text)", !LLMSuggester.doubts(in: text).isEmpty)
+        }
+
         print("\n\(failures == 0 ? "ALL PASSED" : "\(failures) FAILED")")
         return failures == 0 ? 0 : 1
     }

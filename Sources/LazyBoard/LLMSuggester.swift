@@ -84,7 +84,8 @@ final class LLMSuggester {
     private var warmRequestID = 0
     /// Segment that arrived while a request was in flight; requested when that one finishes.
     private var queuedSegment: String?
-    var debounce: TimeInterval = 0.9
+    /// Pause before a while-typing check: long enough to skip mid-sentence thinking pauses (each check is a paid call).
+    var debounce: TimeInterval = 2.0
     static let maxSegmentKeys = 1500
     /// (original segment, reply), only when something changed. Delivered on the main thread.
     var onResult: ((String, Reply) -> Void)?
@@ -429,18 +430,22 @@ final class LLMSuggester {
             // Thai typed on the English layout uses the digit and / keys too (gliH0ch]loj8tjt, /yj':hkp = ฝั่งซ้าย),
             // so those are only code or paths when the keys do not read as Thai.
             let scalars = Array(token.unicodeScalars)
+            if looksLikeCode(token) { continue }
             if scalars.count >= 3, scalars.allSatisfy(KeyMap.isMappableASCII), readsAsThai(scalars),
                !token.split(separator: "/").allSatisfy({ d.isEnglishWord(String($0)) }) {
                 found.append((token, .layout))
                 continue
             }
             if token.hasPrefix("/") { continue }
+            let thaiPart = String(String.UnicodeScalarView(token.unicodeScalars.filter { $0 != "ๆ" }))
+            if token.unicodeScalars.allSatisfy({ KeyMap.isThai($0) }), isDrawnOut(thaiPart) { continue }
             if let hint = layoutHints(for: token)[token] {
                 // Real Thai whose keys spell nothing English (แก้ใน -> cdh.o) is just Thai; หแพรยะ -> script is not.
                 let core = hint.trimmingCharacters(in: CharacterSet(charactersIn: ".,'-"))
-                guard token.unicodeScalars.allSatisfy(KeyMap.isThai), Detector.isRealThai(token), !d.isEnglishWord(core),
-                      // A whole dictionary word (หน่อย -> sojvp) is Thai even when its keys look English-shaped.
-                      Detector.thaiWords.contains(token) || !(core.count >= 5 && core.allSatisfy(\.isLetter) && Detector.looksEnglish(core)) else {
+                // Real Thai that splits into dictionary words (หน่อย, ทำได้ -> mewfh) is Thai even when its keys look
+                // English-shaped; only keys that spell a real English word (หแพรยะ -> script) make it a layout slip.
+                guard token.unicodeScalars.allSatisfy({ KeyMap.isThai($0) || $0 == "ๆ" }), Detector.isRealThai(token),
+                      ThaiOrtho.isValid(token.unicodeScalars), !d.isEnglishWord(core) else {
                     found.append((token, .layout))
                     continue
                 }
@@ -449,7 +454,8 @@ final class LLMSuggester {
             let code = token.contains(where: \.isNumber)
             for run in runs(of: token) {
                 if KeyMap.isThai(run.unicodeScalars.first!) {
-                    if ThaiTypos.fix(run) != nil {
+                    if isDrawnOut(run) { continue }
+                    if ThaiTypos.fix(run, slips: false) != nil {
                         found.append((run, .typo))
                     } else if !ThaiOrtho.isValid(run.unicodeScalars) || !Detector.isRealThai(run) {
                         let unknown = SuggestionPanel.tokens(run).filter { !Detector.isRealThai($0) }
@@ -470,6 +476,37 @@ final class LLMSuggester {
             }
         }
         return found
+    }
+
+    /// Numbers, tickers, acronyms, camelCase names and branch or path names: never Thai typed on the wrong layout.
+    static func looksLikeCode(_ token: String) -> Bool {
+        let scalars = Array(token.unicodeScalars)
+        guard scalars.allSatisfy({ $0.value < 0x80 }) else { return false }
+        let letters = scalars.filter { CharacterSet.letters.contains($0) }
+        // 1:1, 10000, 514.37
+        if letters.isEmpty { return true }
+        // BTC, ABCD&P500E: a few capitals, maybe digits and &.
+        if letters.count >= 2, letters.count <= 6, letters.allSatisfy({ CharacterSet.uppercaseLetters.contains($0) }),
+           scalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) || $0 == "&" }) { return true }
+        // ekycOnboarded, gRPC, getUserName
+        if token.range(of: "^[a-z]{2,}[A-Z][a-z]{2,}([A-Z][a-z0-9]*)*$|^[a-z]+[A-Z]{2,}[a-z0-9]*$", options: .regularExpression) != nil {
+            return true
+        }
+        // feature/change-sim-to-esim: most pieces are English words.
+        let parts = token.split(whereSeparator: { $0 == "/" || $0 == "-" || $0 == "_" }).map(String.init)
+            .filter { $0.count >= 2 && $0.allSatisfy(\.isLetter) }
+        if parts.count >= 3 {
+            let english = parts.filter { Detector.shared.isEnglishWord($0) }.count
+            if english * 2 >= parts.count { return true }
+        }
+        return false
+    }
+
+    /// Chat stretches the last sound (ง๊าบบบ, เล๊ยยยย, ฮ๊าาา, แงงง): three or more of the same letter at the end.
+    static func isDrawnOut(_ run: String) -> Bool {
+        let scalars = Array(run.unicodeScalars)
+        guard let last = scalars.last, scalars.count >= 3 else { return false }
+        return scalars.suffix(3).allSatisfy { $0 == last } || (scalars.suffix(2).allSatisfy { $0 == last } && run.hasSuffix("ๆ") == false && Detector.isRealThai(String(String.UnicodeScalarView(scalars.dropLast()))))
     }
 
     /// Keys that give mostly Thai letters, with a vowel or tone, on the Thai layout.

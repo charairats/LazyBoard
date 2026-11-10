@@ -24,6 +24,15 @@ if let i = CommandLine.arguments.firstIndex(of: "--try"), i + 1 < CommandLine.ar
     exit(0)
 }
 
+if let i = CommandLine.arguments.firstIndex(of: "--doubts"), i + 1 < CommandLine.arguments.count {
+    // What the local check doubts in each text, and why (one argument per text).
+    for text in CommandLine.arguments[(i + 1)...] {
+        let found = LLMSuggester.doubts(in: text)
+        print("\(text): " + (found.isEmpty ? "fine" : found.map { "\($0.word) (\($0.why.rawValue))" }.joined(separator: ", ")))
+    }
+    exit(0)
+}
+
 if let i = CommandLine.arguments.firstIndex(of: "--verdict"), i + 1 < CommandLine.arguments.count {
     let d = Detector.shared
     for word in CommandLine.arguments[(i + 1)...] {
