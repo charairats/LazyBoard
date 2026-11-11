@@ -21,6 +21,8 @@ struct Suggestion: Equatable {
     var source: Source = .layout
     /// Other full replacements the user can cycle to with repeated Tab (LLM only).
     var alternatives: [String] = []
+    /// What was typed, for setting a Claude fix against it (LLM only).
+    var original: String? = nil
 }
 
 /// Decides whether the tail of what was typed is Thai typed on the English layout (or vice versa).
@@ -49,6 +51,41 @@ final class Detector {
         "นะคะ", "นะครับ", "อะไร", "ยังไง", "ทำไม", "ที่ไหน", "เมื่อไหร่", "เท่าไหร่", "แค่ไหน", "ตอน", "ตอนนี้",
         "รอ", "ขอ", "ลอง", "เทส", "รีเทส", "เช็ค", "รัน", "แปะ", "ทัก", "ตอบ", "ถาม", "อ่าน", "เขียน", "ดูก่อน",
         "วันนี้", "พรุ่งนี้", "เมื่อวาน", "เช้า", "เย็น", "คืน", "โมง", "ชั่วโมง", "นาที", "ขอบคุณ", "ขอโทษ",
+        // Everyday words of three keys or more: ICU word breaking also keeps gibberish whole, so it cannot vouch for them.
+        "เดิน", "เด่น", "โดด", "รีบ", "วิ่ง", "นั่ง", "ยืน", "หยุด", "กลับ", "เล่น", "เรียน", "สอน", "พูด", "คุย", "ฟัง",
+        "มอง", "ลืม", "รัก", "ชอบ", "เกลียด", "กลัว", "โกรธ", "เหนื่อย", "ง่วง", "หิว", "อิ่ม", "สบาย", "ป่วย", "เจ็บ",
+        "ปวด", "ร้อน", "หนาว", "แดด", "น้ำ", "ข้าว", "กาแฟ", "อาหาร", "ขนม", "ผลไม้", "บ้าน", "ห้อง",
+        "ประตู", "โต๊ะ", "เก้าอี้", "ถนน", "เมือง", "ที่นี่", "ที่นั่น", "ตรงนี้", "ตรงนั้น", "เพื่อน", "แฟน", "แม่", "พ่อ", "ลูก",
+        "น้อง", "ป้า", "ลุง", "เด็ก", "ผู้ใหญ่", "หัว", "ปาก", "มือ", "เท้า", "แขน", "ความ",
+        "การ", "เรื่อง", "ข้อความ", "ภาษา", "ไทย", "อังกฤษ", "ตัวอย่าง", "ปัญหา", "คำถาม", "คำตอบ", "ระบบ", "โปรแกรม", "เกม", "ไฟล์",
+        "ข้อมูล", "รูป", "ภาพ", "เสียง", "วิดีโอ", "เพลง", "หนัง", "หนังสือ", "เอกสาร", "ลิงก์", "เมนู", "ตั้งค่า", "เครื่อง", "แป้น",
+        "คีย์บอร์ด", "เมาส์", "มือถือ", "โทร", "ประชุม", "ลูกค้า", "บริษัท", "เจ้านาย", "ราคา", "สินค้า", "ของขวัญ", "เวลา", "เดือน", "สัปดาห์",
+        "เสาร์", "อาทิตย์", "จันทร์", "อังคาร", "พุธ", "พฤหัส", "ศุกร์", "สวย", "หล่อ", "เก่ง", "แย่", "ยาก", "ง่าย", "หนัก", "เบา",
+        "ยาว", "สั้น", "สูง", "ต่ำ", "กว้าง", "แคบ", "ใกล้", "ไกล", "ถูกต้อง", "สำคัญ", "ชัด", "มั่นใจ", "พร้อม", "ว่าง", "ยุ่ง",
+        "สนุก", "เบื่อ", "ตลก", "เศร้า", "ดีใจ", "เสียใจ", "เข้าใจ", "รู้สึก", "อยาก", "ต้องการ", "ตัดสินใจ", "เลือก", "เปลี่ยน", "สร้าง", "ทำงาน",
+        "แก้ไข", "ตรวจ", "ตรวจสอบ", "ทดสอบ", "แปลง", "พิมพ์", "คลิก", "เลื่อน", "ลาก", "วาง", "เก็บ", "ทิ้ง", "หาย",
+        "แชร์", "โพสต์", "อัปเดต", "ติดตั้ง", "ดาวน์โหลด", "เสีย", "ค้าง", "ช้าลง", "เร็วขึ้น", "ดีขึ้น", "แย่ลง", "มากขึ้น", "น้อยลง", "จริงๆ", "เลยนะ",
+    ]
+
+    /// Chat and teen slang, and casual spellings, that the dictionary lacks or a fix would wrongly "correct".
+    /// Treated as everyday words: never doubted, and keys that spell one are Thai (ivcxx = รอแปป).
+    static let slangThai: Set<String> = [
+        "เริ่ด", "ปัง", "ปังมาก", "ปังปุริเย่", "จึ้ง", "จึ้งมาก", "ฉ่ำ", "ตึง", "ตัวตึง", "ตัวแม่", "ตัวมัม", "ตัวพ่อ",
+        "แม่", "มูฟออน", "มู", "สายมู", "ชิว", "ชิล", "ชิลล์", "แซ่บ", "นัว", "ฟิน", "ฟีล", "ฟีลแบบ", "เวิร์ค", "เวิร์ก",
+        "เป๊ะ", "เป๊ะปัง", "คิ้วท์", "คิวท์", "ต๊าช", "ปุยมุ้ย", "เกินปุยมุ้ย", "เกิน", "ล้ำ", "ลั่น", "สับ", "ขิง", "ติ่ง",
+        "ปั่น", "ชง", "ชิป", "นก", "เท", "โป๊ะ", "โป๊ะแตก", "แกง", "โดนแกง", "ตุย", "กาว", "บาน", "ผิดบาน", "บานเลย",
+        "รอแปป", "รอแพพ", "แปป", "แพพ", "แปบ", "แป๊บ", "แป้บ", "รอแป๊บ", "เด๋ว", "เดะ", "เด่ว", "เดี๋ยวก่อน",
+        "ป่าว", "ปล่าว", "ป้ะ", "มะ", "ไม", "งะ", "งับ", "ค้าบ", "คร้าบ", "คับ", "ฮะ", "อ้ะ", "เนอะ", "เนาะ", "เด้อ", "เน้อ",
+        "จ้ะ", "จ้า", "จ๋า", "เหอะ", "เถอะ", "เนี่ย", "ไรเนี่ย", "ไรงี้", "อะไรงี้", "งี้", "ไง", "ทำไง", "เบย", "บ่",
+        "ชิมิ", "ใช่มะ", "จริงดิ", "จริงป่ะ", "ได้ป่าว", "ไหว", "ไม่ไหว", "อีหยัง", "หยัง", "งง", "งือ", "งุงิ", "ฮือ", "แง",
+        "อิอิ", "คิคิ", "คริคริ", "ฮ่า", "อุ๊ย", "ว้าย", "ว้าว", "โอ้โห", "อ่าว", "อ้าว", "เอ้า", "เอ๊ะ", "เห้ย", "เฮ้ย",
+        "กุ", "กู", "มึง", "แก", "ตะเอง", "ตัวเอง", "เค้า", "คือแบบ", "แบบว่า", "จัดไป", "จัดให้", "เบิ้ล", "เพลีย",
+    ]
+
+    /// Everyday English words spelled only with Roman numeral letters, which stay English in lowercase.
+    static let romanLetterWords: Set<String> = [
+        "civic", "civil", "did", "dill", "dim", "div", "id", "ill", "lid", "livid", "mic", "mid", "mild", "mill",
+        "mimic", "mix", "vim", "vivid",
     ]
 
     /// Dev and product words macOS's dictionary does not know; never treated as mistyped Thai.
@@ -66,6 +103,12 @@ final class Detector {
         "azure", "cloudflare", "nginx", "linux", "ubuntu", "homebrew", "brew", "cli", "sdk", "ide", "vscode", "cursor",
         "copilot", "chatgpt", "openai", "claude", "anthropic", "llm", "ai", "ml", "ok", "okay", "lol", "btw", "fyi",
         "asap", "tbh", "imo", "idk", "wfh", "eta", "nirvania", "lazyboard",
+        "mvp", "ctrl", "cmd", "alt", "esc", "md", "yml", "txt", "py", "sh", "rb", "kt", "tsx", "jsx", "mjs", "dto",
+        "cms", "seo", "otp", "esim", "adhoc", "stg", "prd", "regex", "cron", "enum", "bool", "async", "ngrok", "rtk",
+        "repo", "api", "sit", "push", "pull",
+        "html", "css", "http", "https", "url", "xml", "csv", "tsv", "pdf", "png", "jpg", "jpeg", "svg", "gif", "dvd",
+        "ssh", "ssl", "tls", "tcp", "udp", "dns", "vpn", "cdn", "mcp", "gpt", "kpi", "crm", "erp", "pm", "hr", "tv", "pc",
+        "hmm", "shh", "mr", "mrs", "ms", "dr", "st", "nd", "rd", "th",
     ]
 
     // MARK: Public
@@ -122,14 +165,35 @@ final class Detector {
         if KeyMap.isThaiLayoutWord(scalars) {
             return thaiToEnglishVerdict(word, scalars, isLast: isLast)
         }
+        // The layout switched a key or two into an English word (สogin, สocal): those keys were meant as English too.
+        let thaiHead = scalars.prefix(while: KeyMap.isThai).count
+        if (1...2).contains(thaiHead), scalars.count - thaiHead >= 2,
+           scalars.dropFirst(thaiHead).allSatisfy({ $0.value < 0x80 && CharacterSet.letters.contains($0) }) {
+            let english = KeyMap.convert(scalars, direction: .thaiToEnglish)
+            if english.count >= 4, isEnglishWord(english) { return WordVerdict(direction: .thaiToEnglish, confidence: .strong) }
+        }
         return .none
+    }
+
+    /// Code-ish text with separators or digits whose every word part is one we know: feature/build-esim,
+    /// README.md, levels.maxLevel, k8s. Parts split on . / _ - and on camelCase humps.
+    func isDevToken(_ text: String) -> Bool {
+        let core = text.trimmingCharacters(in: CharacterSet(charactersIn: "\"'(),?!;:[]{}"))
+        guard core.count >= 3, core.range(of: "^[A-Za-z0-9][A-Za-z0-9./_-]*[A-Za-z0-9]$", options: .regularExpression) != nil,
+              core.contains(where: { "./_-".contains($0) || $0.isNumber }) else { return false }
+        if Self.knownEnglish.contains(core.lowercased()) { return true }
+        guard core.range(of: "[./_-]", options: .regularExpression) != nil else { return false }
+        let spaced = core.replacingOccurrences(of: "([a-z])([A-Z])", with: "$1 $2", options: .regularExpression)
+        let parts = spaced.split(whereSeparator: { " ./_-".contains($0) }).map(String.init).filter { !$0.allSatisfy(\.isNumber) }
+        return parts.count >= 2 && parts.allSatisfy { $0.count >= 2 && isEnglishWord($0) } && parts.contains { $0.count >= 3 }
     }
 
     // MARK: English layout → Thai
 
     private func englishToThaiVerdict(_ word: String, _ scalars: [Unicode.Scalar], isLast: Bool) -> WordVerdict {
         if scalars.allSatisfy({ (0x30...0x39).contains($0.value) }) { return .none }
-        if word.contains("://") || word.contains("@") || word.hasPrefix("/") || word.hasPrefix("~") { return .none }
+        // ฝ sits on the / key, so /yj':hkp is ฝั่งซ้าย; only a path with more slashes is surely not Thai.
+        if word.contains("://") || word.contains("@") || (word.hasPrefix("/") && word.dropFirst().contains("/")) || word.hasPrefix("~") { return .none }
 
         let thai = Array(KeyMap.convert(scalars, direction: .englishToThai).unicodeScalars)
         let thaiCount = thai.filter(KeyMap.isThai).count
@@ -144,22 +208,22 @@ final class Detector {
         let hasVowel = ThaiOrtho.hasVowelOrTone(thai)
         let englishOK = isEnglishWord(word)
         let lenient = isLast || (scalars.count <= 2 && !englishOK)
-        let isCommon = Self.commonShortThai.contains(thaiString)
-        // Thai typed on the US layout nearly always hits ; ' [ ] , . / - = keys (ว ง บ ล ม ใ ฝ ข ช …).
-        // A short word with none of them that is shaped like English (google, github) is probably English.
-        let hasSymbolKey = word.unicodeScalars.contains { ";'[],./-=\\".unicodeScalars.contains($0) }
-        let englishShaped = !hasSymbolKey && scalars.count <= 8 && Self.looksEnglish(word)
+        let isCommon = Self.commonShortThai.contains(thaiString) || Self.slangThai.contains(thaiString)
+        // Never turn anything into Thai that is not Thai words: cloudfailre -> แสนีกดฟรสพำ.
+        guard isCommon || Self.isRealThai(thaiString) else { return .none }
 
         // Two-key common Thai words whose keys happen to spell a dictionary entry (iv = รอ, mu = ที).
-        if isCommon, scalars.count <= 2, !Self.knownEnglish.contains(word.lowercased()) {
+        // Everyday words only: two-key slang (w, = ไม) is too easy to hit by accident.
+        if Self.commonShortThai.contains(thaiString), scalars.count <= 2, !Self.knownEnglish.contains(word.lowercased()) {
             return WordVerdict(direction: .englishToThai, confidence: .strong)
         }
-        if !englishOK && hasVowel && !(englishShaped && !isCommon) {
-            if isCommon { return WordVerdict(direction: .englishToThai, confidence: .strong) }
-            let needed = violations == 0 ? 0.5 : 0.7
-            if scalars.count >= 4 && thaiWordScore(thaiString) >= needed {
-                return WordVerdict(direction: .englishToThai, confidence: .strong)
-            }
+        // An everyday or slang word of four keys or more, even when the spell checker passes the keys
+        // (ivcxx reads as Roman numerals, but it is รอแปป).
+        if isCommon, scalars.count >= 4, !Self.knownEnglish.contains(word.lowercased()) {
+            return WordVerdict(direction: .englishToThai, confidence: .strong)
+        }
+        if !englishOK && (scalars.count >= 4 || (hasVowel && isCommon)) {
+            return WordVerdict(direction: .englishToThai, confidence: .strong)
         }
         // A real English word in the middle of the run ends it, unless it is also a common Thai word.
         if englishOK && !lenient && !isCommon { return .none }
@@ -172,9 +236,16 @@ final class Detector {
     // MARK: Thai layout → English
 
     private func thaiToEnglishVerdict(_ word: String, _ scalars: [Unicode.Scalar], isLast: Bool) -> WordVerdict {
+        // A word we know is Thai stays Thai, whatever its keys spell (รอแปป = ivcxx).
+        if Self.commonShortThai.contains(word) || Self.slangThai.contains(word) { return .none }
         let english = KeyMap.convert(scalars, direction: .thaiToEnglish)
         // Digits typed on the Thai layout: "ๅจ" is 10, "ๅจ.๒" is 10.2 … (two or more keys).
         if scalars.count >= 2, english.range(of: "^[0-9][0-9.,:%/-]*$", options: .regularExpression) != nil {
+            return WordVerdict(direction: .thaiToEnglish, confidence: .strong)
+        }
+        // Branch names, file names, paths (feature/build-esim, README.md, k8s): every part a word we know.
+        let devToken = isDevToken(english)
+        if devToken, !Self.isRealThai(word) {
             return WordVerdict(direction: .thaiToEnglish, confidence: .strong)
         }
         guard english.range(of: "^[A-Za-z]+(?:['-][A-Za-z]+)*[.,!?]?$", options: .regularExpression) != nil else { return .none }
@@ -198,6 +269,16 @@ final class Detector {
         if englishOK, !thaiHasVowel, core.count >= 2, scalars.contains(where: { KeyMap.shiftLayerThai.contains($0) }) {
             return WordVerdict(direction: .thaiToEnglish, confidence: .strong)
         }
+        // A real English or dev word whose keys make no Thai word (ยีห้ = push, พำยน = repo): spelling rules
+        // alone could not tell, the Thai dictionary can.
+        if englishOK, core.count >= 3, !Self.isRealThai(word) {
+            return WordVerdict(direction: .thaiToEnglish, confidence: .strong)
+        }
+        // Every key shifted and no Thai reading (์ญฉ = NPC): an acronym typed on the Thai layout.
+        if !thaiValid, (2...6).contains(core.count), core.allSatisfy(\.isUppercase),
+           scalars.allSatisfy({ KeyMap.shiftLayerThai.contains($0) }) {
+            return WordVerdict(direction: .thaiToEnglish, confidence: .strong)
+        }
         if !thaiValid && englishHasVowel && core.count >= 3 {
             return WordVerdict(direction: .thaiToEnglish, confidence: .strong)
         }
@@ -206,6 +287,8 @@ final class Detector {
         if !englishOK, core.count >= 5, Self.looksEnglish(core), thaiWordScore(word) < 0.34 {
             return WordVerdict(direction: .thaiToEnglish, confidence: .strong)
         }
+        // A real Thai word next to a mistyped English one stays Thai: รอ พำรำรไ must not become "iv review".
+        if thaiValid && (Self.commonShortThai.contains(word) || Self.isRealThai(word)) { return .none }
         if englishOK || (!thaiValid && (lenient || englishHasVowel)) {
             return WordVerdict(direction: .thaiToEnglish, confidence: .weak)
         }
@@ -238,12 +321,53 @@ final class Detector {
         if w.isEmpty { return false }
         if w.count == 1 { return true }
         if Self.knownEnglish.contains(w.lowercased()) { return true }
+        // Roman numerals only count in capitals (รอ IV): the spell checker passes lowercase iv and ivcxx,
+        // which are รอ and รอแปป typed on the English layout.
+        if w.range(of: "^[ivxlcdm]+$", options: .regularExpression) != nil { return Self.romanLetterWords.contains(w) }
+        // The spell checker passes vowel-less strings as abbreviations (dvdd, dd-dv), so กอกก would become dvdd.
+        let parts = w.lowercased().split(separator: "-").map(String.init)
+        let spelled = parts.allSatisfy { part in
+            part.count == 1 || Self.knownEnglish.contains(part) || part.contains { "aeiouy".contains($0) }
+        }
+        if !spelled { return false }
         if let cached = spellCache[w] { return cached }
         let r = NSSpellChecker.shared.checkSpelling(of: w, startingAt: 0, language: "en", wrap: false,
                                                     inSpellDocumentWithTag: 0, wordCount: nil)
         let ok = r.location == NSNotFound
         spellCache[w] = ok
         return ok
+    }
+
+    /// libthai's word list (Resources/thai-words.txt) plus the everyday words above. Without the file only those remain.
+    static let thaiWords: Set<String> = {
+        var words = commonShortThai.union(slangThai)
+        if let url = Bundle.main.url(forResource: "thai-words", withExtension: "txt"),
+           let text = try? String(contentsOf: url, encoding: .utf8) {
+            words.formUnion(text.split(separator: "\n").map(String.init))
+        }
+        return words
+    }()
+    private static let longestThaiWord = thaiWords.map { $0.unicodeScalars.count }.max() ?? 0
+
+    /// Every Thai run must be a dictionary word or split into them. Rare two-letter words (พำ+กก, แส+นี) can spell
+    /// almost anything, so inside a split two-letter words must be everyday ones (มา+ดู).
+    static func isRealThai(_ text: String) -> Bool {
+        let letters = text.unicodeScalars.split { !KeyMap.isThai($0) || $0 == "ๆ" || $0 == "ฯ" }.map(Array.init)
+        return !letters.isEmpty && letters.allSatisfy { run in
+            thaiWords.contains(String(String.UnicodeScalarView(run))) || splitsIntoThaiWords(run)
+        }
+    }
+
+    private static func splitsIntoThaiWords(_ run: [Unicode.Scalar]) -> Bool {
+        var reachable = [Bool](repeating: false, count: run.count + 1)
+        reachable[0] = true
+        for i in 0..<run.count where reachable[i] {
+            for j in (i + 2)..<max(i + 2, min(run.count, i + longestThaiWord) + 1) {
+                let piece = String(String.UnicodeScalarView(run[i..<j]))
+                if j - i == 2 ? commonShortThai.contains(piece) : thaiWords.contains(piece) { reachable[j] = true }
+            }
+        }
+        return reachable[run.count]
     }
 
     /// Fraction of Thai letters that fall inside ICU word tokens (≥2 letters, containing a vowel or tone).

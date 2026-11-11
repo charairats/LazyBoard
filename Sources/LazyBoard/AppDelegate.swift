@@ -1,35 +1,60 @@
 import Cocoa
 import ServiceManagement
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemValidation {
     private let monitor = KeyMonitor()
     private let defaults = UserDefaults.standard
     private var statusItem: NSStatusItem!
     private var permissionTimer: Timer?
 
-    private let statusLine = NSMenuItem(title: "กำลังเริ่ม…", action: nil, keyEquivalent: "")
-    private let enabledItem = NSMenuItem(title: "เปิดใช้งาน", action: #selector(toggleEnabled), keyEquivalent: "")
-    private let switchItem = NSMenuItem(title: "สลับคีย์บอร์ดให้หลังแก้", action: #selector(toggleSwitch), keyEquivalent: "")
-    private let autoFixItem = NSMenuItem(title: "แก้พิมพ์ค้างคีย์บอร์ดให้เองตอนเคาะ space/Enter (Esc ย้อนกลับ)", action: #selector(toggleAutoFix), keyEquivalent: "")
-    private let holdItem = NSMenuItem(title: "อม Enter ไว้ให้ Claude ตรวจก่อนส่ง (Ctrl+Enter = ส่งเลย)", action: #selector(toggleHold), keyEquivalent: "")
-    private let emojiItem = NSMenuItem(title: "โหมดอีโมจิ: เติมท้ายข้อความ 1–2 ตัวตอนส่ง", action: #selector(toggleEmoji), keyEquivalent: "")
-    private let politeItem = NSMenuItem(title: "โหมดสุภาพ (สื่อสารในที่ทำงาน)", action: nil, keyEquivalent: "")
-    private let politeMenu = NSMenu()
-    private let quietItem = NSMenuItem(title: "ให้ Claude ตรวจเงียบๆ ระหว่างหยุดพิมพ์ด้วย", action: #selector(toggleQuiet), keyEquivalent: "")
-    private let testItem = NSMenuItem(title: "แบบทดสอบการพิมพ์…", action: #selector(openTypingTest), keyEquivalent: "")
-    private let excludeItem = NSMenuItem(title: "ไม่ใช้ในแอปนี้", action: #selector(toggleExclude), keyEquivalent: "")
-    private let loginItem = NSMenuItem(title: "เปิดอัตโนมัติตอน login", action: #selector(toggleLogin), keyEquivalent: "")
-    private let llmItem = NSMenuItem(title: "แก้คำผิดด้วย Claude (หลังหยุดพิมพ์)", action: #selector(toggleLLM), keyEquivalent: "")
-    private let apiKeyItem = NSMenuItem(title: "ตั้งค่า Claude API key…", action: #selector(editAPIKey), keyEquivalent: "")
-    private let modelMenu = NSMenu()
-    private let backendMenu = NSMenu()
-    private let llmStatusLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    // Menu items. Titles are set in buildStatusItem / refreshMenuState.
+    private let statusLine = NSMenuItem(title: "Starting…", action: nil, keyEquivalent: "")
+    private let claudeLine = NSMenuItem(title: "", action: #selector(fixClaude), keyEquivalent: "")
+    private let enabledItem = NSMenuItem(title: "Enabled", action: #selector(toggleEnabled), keyEquivalent: "")
+    private let excludeItem = NSMenuItem(title: "Disable in This App", action: #selector(toggleExclude), keyEquivalent: "")
+    private let autoFixItem = NSMenuItem(title: "Auto-Fix on Space / Enter  (Esc to undo)", action: #selector(toggleAutoFix), keyEquivalent: "")
+    private let switchItem = NSMenuItem(title: "Switch Input Source After Fix", action: #selector(toggleSwitch), keyEquivalent: "")
+    private let llmItem = NSMenuItem(title: "Use Claude", action: #selector(toggleLLM), keyEquivalent: "")
+    private let sendCheckItem = NSMenuItem(title: "Check Before Send", action: nil, keyEquivalent: "")
+    private let sendCheckMenu = NSMenu()
+    private let quietItem = NSMenuItem(title: "Also Check When I Pause Typing", action: #selector(toggleQuiet), keyEquivalent: "")
+    private let rewriteItem = NSMenuItem(title: "Polish on Send", action: nil, keyEquivalent: "")
+    private let rewriteMenu = NSMenu()
+    private let emojiItem = NSMenuItem(title: "Add 1–2 Emoji at the End", action: #selector(toggleEmoji), keyEquivalent: "")
+    private let connectionItem = NSMenuItem(title: "Connection", action: nil, keyEquivalent: "")
+    private let connectionMenu = NSMenu()
+    private let apiKeyItem = NSMenuItem(title: "Set API Key…", action: #selector(editAPIKey), keyEquivalent: "")
+    private let testItem = NSMenuItem(title: "Typing Test…", action: #selector(openTypingTest), keyEquivalent: "")
+    private let loginItem = NSMenuItem(title: "Open at Login", action: #selector(toggleLogin), keyEquivalent: "")
+    private var backendItems: [NSMenuItem] = []
+    private var modelItems: [NSMenuItem] = []
+    private var politeItems: [NSMenuItem] = []
     private var fixCount = 0
+
+    /// How Enter and Ctrl+Enter behave. Maps onto holdOnEnter + enterChecks.
+    private enum SendCheck: String, CaseIterable {
+        case off, ctrlEnter, enter
+        var title: String {
+            switch self {
+            case .off: return "Off  (Enter sends as typed)"
+            case .ctrlEnter: return "Ctrl+Enter checks  ·  Enter sends as typed"
+            case .enter: return "Enter checks  ·  Ctrl+Enter sends as typed"
+            }
+        }
+        var short: String {
+            switch self {
+            case .off: return "Off"
+            case .ctrlEnter: return "Ctrl+Enter"
+            case .enter: return "Enter"
+            }
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         migrateOldSettings()
+        WordLog.purge()
         defaults.register(defaults: ["enabled": true, "switchLayout": true, "excluded": [String](),
-                                     "autoFix": true, "holdOnEnter": true, "checkWhileTyping": false, "emojiMode": false,
+                                     "autoFix": true, "holdOnEnter": true, "enterChecks": false, "checkWhileTyping": false, "emojiMode": false,
                                      "llmEnabled": true, "llmModel": LLMSuggester.Model.haiku.rawValue,
                                      "llmBackend": LLMSuggester.Backend.claudeCLI.rawValue])
         monitor.llm.backend = LLMSuggester.Backend(rawValue: defaults.string(forKey: "llmBackend") ?? "") ?? .claudeCLI
@@ -37,6 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         monitor.switchLayoutAfterFix = defaults.bool(forKey: "switchLayout")
         monitor.autoFixLayout = defaults.bool(forKey: "autoFix")
         monitor.holdOnEnter = defaults.bool(forKey: "holdOnEnter")
+        monitor.enterChecks = defaults.bool(forKey: "enterChecks")
         monitor.checkWhileTyping = defaults.bool(forKey: "checkWhileTyping")
         monitor.llm.emojiMode = defaults.bool(forKey: "emojiMode")
         monitor.llm.polite = LLMSuggester.Polite(rawValue: defaults.string(forKey: "politeMode") ?? "") ?? .off
@@ -44,6 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         monitor.llm.isEnabled = defaults.bool(forKey: "llmEnabled")
         monitor.llm.model = LLMSuggester.Model(rawValue: defaults.string(forKey: "llmModel") ?? "") ?? .haiku
         monitor.llm.apiKey = KeychainStore.read()
+        Log.write("llm: backend \(monitor.llm.backend.rawValue), enabled \(monitor.llm.isEnabled), api key \(monitor.llm.apiKey == nil ? "none" : "saved"), claude cli \(LLMSuggester.claudePath == nil ? "missing" : "found")")
         monitor.onFix = { [weak self] s in
             guard let self = self else { return }
             self.fixCount += 1
@@ -80,86 +107,142 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func buildStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let image = Self.boltKeyboardIcon() {
+        if let image = Self.okIcon {
             statusItem.button?.image = image
         } else {
-            statusItem.button?.title = "ไท"
+            statusItem.button?.title = "LB"
         }
         let menu = NSMenu()
         menu.delegate = self
-        statusLine.isEnabled = false
+
+        // 1. Status: what LazyBoard is doing, and whether Claude works (click it when it shows a problem).
         menu.addItem(statusLine)
-        testItem.target = self
-        menu.addItem(testItem)
+        claudeLine.target = self
+        menu.addItem(claudeLine)
         menu.addItem(.separator())
 
-        // Everyday switches only; everything else lives under "ตั้งค่าเพิ่มเติม".
-        enabledItem.title = "เปิดใช้งาน"
-        holdItem.title = "ตรวจด้วย Claude ก่อนส่ง (Ctrl+Enter ข้าม)"
-        emojiItem.title = "เติมอีโมจิท้ายข้อความ"
+        // 2. On/off.
+        add([enabledItem, excludeItem], to: menu)
+        menu.addItem(.separator())
+
+        // 3. Wrong-layout fixes (works offline, no Claude).
+        menu.addItem(Self.header("Wrong Keyboard Fixes (offline)"))
+        add([autoFixItem, switchItem], to: menu)
+        menu.addItem(.separator())
+
+        // 4. Claude: master switch first, then what it does.
+        menu.addItem(Self.header("Claude Spell Check"))
+        for mode in SendCheck.allCases {
+            let item = NSMenuItem(title: mode.title, action: #selector(selectSendCheck(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = mode.rawValue
+            sendCheckMenu.addItem(item)
+        }
+        sendCheckItem.submenu = sendCheckMenu
+
+        rewriteMenu.addItem(Self.header("Polite Ending (work chats)"))
         for polite in LLMSuggester.Polite.allCases {
-            let item = NSMenuItem(title: polite.title, action: #selector(selectPolite(_:)), keyEquivalent: "")
+            let title: String
+            switch polite {
+            case .off: title = "None"
+            default: title = polite == .khrap ? "Khrap (ครับ)" : "Kha (ค่ะ)"
+            }
+            let item = NSMenuItem(title: title, action: #selector(selectPolite(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = polite.rawValue
-            politeMenu.addItem(item)
+            politeItems.append(item)
+            rewriteMenu.addItem(item)
         }
-        politeItem.submenu = politeMenu
-        for item in [enabledItem, holdItem, emojiItem, politeItem, excludeItem] {
-            item.target = self
-            menu.addItem(item)
-        }
-        menu.addItem(.separator())
+        rewriteMenu.addItem(.separator())
+        emojiItem.target = self
+        rewriteMenu.addItem(emojiItem)
+        rewriteItem.submenu = rewriteMenu
 
-        let advanced = NSMenu()
-        switchItem.title = "สลับคีย์บอร์ดให้หลังแก้"
-        autoFixItem.title = "แก้พิมพ์ค้างคีย์บอร์ดให้เองตอนเคาะ space/Enter"
-        quietItem.title = "ให้ Claude ตรวจเงียบๆ ระหว่างหยุดพิมพ์ด้วย"
-        llmItem.title = "ใช้ Claude แก้คำผิด"
-        for item in [switchItem, autoFixItem, quietItem, llmItem, loginItem] {
-            item.target = self
-            advanced.addItem(item)
-        }
-        advanced.addItem(.separator())
-        llmStatusLine.isEnabled = false
-        advanced.addItem(llmStatusLine)
-        let backendItem = NSMenuItem(title: "เรียก Claude ผ่าน", action: nil, keyEquivalent: "")
+        connectionMenu.addItem(Self.header("Connect via"))
         for backend in LLMSuggester.Backend.allCases {
-            let item = NSMenuItem(title: backend.title, action: #selector(selectBackend(_:)), keyEquivalent: "")
+            let item = NSMenuItem(title: backend == .api ? "Claude API Key" : "Claude Code (your existing login)", action: #selector(selectBackend(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = backend.rawValue
-            backendMenu.addItem(item)
+            backendItems.append(item)
+            connectionMenu.addItem(item)
         }
-        backendItem.submenu = backendMenu
-        advanced.addItem(backendItem)
-        let modelItem = NSMenuItem(title: "โมเดล", action: nil, keyEquivalent: "")
+        apiKeyItem.target = self
+        apiKeyItem.indentationLevel = 1
+        connectionMenu.addItem(apiKeyItem)
+        connectionMenu.addItem(.separator())
+        connectionMenu.addItem(Self.header("Model"))
         for model in LLMSuggester.Model.allCases {
-            let item = NSMenuItem(title: model.title, action: #selector(selectModel(_:)), keyEquivalent: "")
+            let item = NSMenuItem(title: model == .haiku ? "Haiku 5.5 (fast, cheap)" : "Opus 5.5 (more accurate)", action: #selector(selectModel(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = model.rawValue
-            modelMenu.addItem(item)
+            modelItems.append(item)
+            connectionMenu.addItem(item)
         }
-        modelItem.submenu = modelMenu
-        advanced.addItem(modelItem)
-        apiKeyItem.target = self
-        advanced.addItem(apiKeyItem)
-        advanced.addItem(.separator())
-        let perm = NSMenuItem(title: "เปิดหน้าตั้งค่า Accessibility…", action: #selector(openAccessibilitySettings), keyEquivalent: "")
-        perm.target = self
-        advanced.addItem(perm)
-        let advancedItem = NSMenuItem(title: "ตั้งค่าเพิ่มเติม", action: nil, keyEquivalent: "")
-        advancedItem.submenu = advanced
-        menu.addItem(advancedItem)
+        connectionItem.submenu = connectionMenu
+
+        add([llmItem, sendCheckItem, quietItem, rewriteItem, connectionItem], to: menu)
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "ออกจาก LazyBoard", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+
+        // 5. Other.
+        add([testItem, loginItem], to: menu)
+        let perm = NSMenuItem(title: "Accessibility Settings…", action: #selector(openAccessibilitySettings), keyEquivalent: "")
+        perm.target = self
+        menu.addItem(perm)
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Quit LazyBoard", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
         refreshMenuState()
+        // Claude errors arrive in the background: keep the icon in step without waiting for the menu to open.
+        iconTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.updateIcon() }
     }
 
-    /// Keyboard with a small lightning bolt at the top-right corner, as a template image.
-    private static func boltKeyboardIcon() -> NSImage? {
+    private func add(_ items: [NSMenuItem], to menu: NSMenu) {
+        for item in items {
+            if item.action != nil { item.target = self }
+            menu.addItem(item)
+        }
+    }
+
+    /// A small grey group title. Real section headers on macOS 14+, a disabled item before that.
+    private static func header(_ title: String) -> NSMenuItem {
+        if #available(macOS 14.0, *) { return NSMenuItem.sectionHeader(title: title) }
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.attributedTitle = NSAttributedString(string: title, attributes: [
+            .font: NSFont.boldSystemFont(ofSize: NSFont.smallSystemFontSize),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ])
+        item.isEnabled = false
+        return item
+    }
+
+    /// Greys out what cannot work right now, instead of hiding it.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item === claudeLine { return claudeProblem != nil }
+        let needsClaude = item === quietItem || item.menu === sendCheckMenu || item.menu === rewriteMenu
+        if needsClaude { return monitor.isEnabled && monitor.llm.isEnabled }
+        if item === autoFixItem || item === switchItem || item === llmItem || item === excludeItem { return monitor.isEnabled }
+        return true
+    }
+
+    private static let okIcon = keyboardIcon(badge: "bolt.fill")
+    private static let errorIcon = keyboardIcon(badge: "exclamationmark.triangle.fill")
+    private var iconTimer: Timer?
+
+    /// Bolt badge when all is well, warning triangle while Claude has a problem.
+    private func updateIcon() {
+        guard let button = statusItem?.button, let ok = Self.okIcon, let bad = Self.errorIcon else { return }
+        let want = claudeProblem == nil ? ok : bad
+        if button.image !== want {
+            button.image = want
+            button.toolTip = claudeProblem.map { "LazyBoard — Claude: \($0)" } ?? "LazyBoard"
+        }
+    }
+
+    /// Keyboard with a small badge symbol at the top-right corner, as a template image.
+    private static func keyboardIcon(badge: String) -> NSImage? {
         guard let keyboard = NSImage(systemSymbolName: "keyboard", accessibilityDescription: "LazyBoard")?
                 .withSymbolConfiguration(.init(pointSize: 15, weight: .regular)),
-              let bolt = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: nil)?
+              let bolt = NSImage(systemSymbolName: badge, accessibilityDescription: nil)?
                 .withSymbolConfiguration(.init(pointSize: 9, weight: .bold)) else { return nil }
         let size = NSSize(width: 22, height: 16)
         let image = NSImage(size: size, flipped: false) { rect in
@@ -184,20 +267,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshMenuState()
     }
 
+    private var sendCheck: SendCheck {
+        !monitor.holdOnEnter ? .off : (monitor.enterChecks ? .enter : .ctrlEnter)
+    }
+
     private func refreshMenuState() {
+        let llm = monitor.llm
         enabledItem.state = monitor.isEnabled ? .on : .off
         switchItem.state = monitor.switchLayoutAfterFix ? .on : .off
         autoFixItem.state = monitor.autoFixLayout ? .on : .off
-        holdItem.state = monitor.holdOnEnter ? .on : .off
         quietItem.state = monitor.checkWhileTyping ? .on : .off
-        emojiItem.state = monitor.llm.emojiMode ? .on : .off
-        politeItem.state = monitor.llm.polite != .off ? .on : .off
-        for item in politeMenu.items {
-            item.state = (item.representedObject as? String) == monitor.llm.polite.rawValue ? .on : .off
+        llmItem.state = llm.isEnabled ? .on : .off
+
+        let mode = sendCheck
+        for item in sendCheckMenu.items {
+            item.state = (item.representedObject as? String) == mode.rawValue ? .on : .off
         }
+        sendCheckItem.title = "Check Before Send: \(mode.short)"
+
+        emojiItem.state = llm.emojiMode ? .on : .off
+        for item in politeItems {
+            item.state = (item.representedObject as? String) == llm.polite.rawValue ? .on : .off
+        }
+        var rewrites: [String] = []
+        if llm.polite != .off { rewrites.append(llm.polite == .khrap ? "Khrap" : "Kha") }
+        if llm.emojiMode { rewrites.append("Emoji") }
+        rewriteItem.title = "Polish on Send: " + (rewrites.isEmpty ? "Off" : rewrites.joined(separator: " + "))
+
+        for item in backendItems {
+            item.state = (item.representedObject as? String) == llm.backend.rawValue ? .on : .off
+        }
+        for item in modelItems {
+            item.state = (item.representedObject as? String) == llm.model.rawValue ? .on : .off
+        }
+        apiKeyItem.title = llm.apiKey == nil ? "Set API Key…" : "Change API Key…  (saved)"
+        connectionItem.title = "Connection: \(backendShort) · \(modelShort)"
+
         statusItem.button?.appearsDisabled = !monitor.isEnabled
         if let app = NSWorkspace.shared.frontmostApplication, let id = app.bundleIdentifier, id != Bundle.main.bundleIdentifier {
-            excludeItem.title = "ไม่ใช้ใน \(app.localizedName ?? id)"
+            excludeItem.title = "Disable in \(app.localizedName ?? id)"
             excludeItem.state = monitor.excludedBundleIDs.contains(id) ? .on : .off
             excludeItem.representedObject = id
             excludeItem.isHidden = false
@@ -210,42 +318,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             loginItem.isHidden = true
         }
-        llmItem.state = monitor.llm.isEnabled ? .on : .off
-        for item in modelMenu.items {
-            item.state = (item.representedObject as? String) == monitor.llm.model.rawValue ? .on : .off
-        }
-        for item in backendMenu.items {
-            item.state = (item.representedObject as? String) == monitor.llm.backend.rawValue ? .on : .off
-        }
-        apiKeyItem.isHidden = monitor.llm.backend != .api
-        if monitor.llm.backend == .api && monitor.llm.apiKey == nil {
-            llmStatusLine.title = "Claude: ยังไม่ได้ใส่ API key"
-        } else if monitor.llm.backend == .claudeCLI && LLMSuggester.claudePath == nil {
-            llmStatusLine.title = "Claude: ไม่พบคำสั่ง claude (ติดตั้ง Claude Code ก่อน)"
-        } else if let err = monitor.llm.lastError {
-            llmStatusLine.title = "Claude: \(err)"
-        } else if !monitor.llm.isEnabled {
-            llmStatusLine.title = "Claude: ปิดอยู่"
-        } else {
-            let latency = monitor.llm.lastLatency > 0 ? String(format: " · ล่าสุด %.1f วิ", monitor.llm.lastLatency) : ""
-            llmStatusLine.title = "Claude: พร้อม · เรียกไปแล้ว \(monitor.llm.requestCount) ครั้ง\(latency)"
-        }
         updateStatusLine()
     }
 
     private var isBundled: Bool { Bundle.main.bundleURL.pathExtension == "app" }
 
+    private var backendShort: String { monitor.llm.backend == .api ? "API key" : "Claude Code" }
+    private var modelShort: String { monitor.llm.model == .haiku ? "Haiku" : "Opus" }
+
+    /// Full text of what stops Claude from working, or nil when it works (or is switched off on purpose).
+    private var claudeProblem: String? {
+        let llm = monitor.llm
+        guard llm.isEnabled else { return nil }
+        if llm.backend == .api && llm.apiKey == nil { return "No API key set" }
+        if llm.backend == .claudeCLI && LLMSuggester.claudePath == nil { return "claude command not found (install Claude Code, or use an API key)" }
+        return llm.lastError.map(Self.englishError)
+    }
+
+    /// LLMSuggester reports errors in Thai; the menu is English.
+    private static func englishError(_ err: String) -> String {
+        if err.contains("login") || err.contains("authenticate") || err.contains("OAuth") { return "Claude Code login expired" }
+        if err.contains("API key") { return "API key rejected" }
+        if err.contains("จำกัดอัตรา") { return "Rate limited, pausing 30s" }
+        if err.contains("ไม่พบคำสั่ง claude") { return "claude command not found" }
+        if err.contains("ตอบช้า") { return "Claude timed out" }
+        if err.contains("Keychain") { return "Couldn't save key to Keychain (works until quit)" }
+        if err.range(of: "[\u{0E00}-\u{0E7F}]", options: .regularExpression) != nil { return "Request failed" }
+        return err
+    }
+
     private func updateStatusLine() {
         if !monitor.isRunning {
-            statusLine.title = "รอสิทธิ์ Accessibility…"
+            statusLine.title = "LazyBoard: Waiting for Accessibility permission…"
         } else if !monitor.isEnabled {
-            statusLine.title = "ปิดอยู่"
+            statusLine.title = "LazyBoard: Off"
         } else {
-            var parts = [fixCount == 0 ? "ทำงานอยู่" : "แก้ไปแล้ว \(fixCount) ครั้ง"]
-            if let err = monitor.llm.lastError { parts.append("Claude: \(err)") }
-            else if monitor.llm.isReady, monitor.llm.lastLatency > 0 { parts.append(String(format: "Claude %.1f วิ", monitor.llm.lastLatency)) }
-            else if !monitor.llm.isReady { parts.append("Claude ยังไม่พร้อม") }
-            statusLine.title = parts.joined(separator: " · ")
+            statusLine.title = "LazyBoard: On" + (fixCount == 0 ? "" : " · \(fixCount) fixes")
+        }
+        let llm = monitor.llm
+        if let problem = claudeProblem {
+            // Keep the menu narrow: a short line here, the full text on click and in the tooltip.
+            var short = problem.components(separatedBy: CharacterSet(charactersIn: ":(\n")).first?
+                .trimmingCharacters(in: .whitespaces) ?? problem
+            if short.count > 40 { short = String(short.prefix(40)) + "…" }
+            claudeLine.title = "⚠️ Claude: \(short) — Fix…"
+            claudeLine.toolTip = problem
+        } else if !llm.isEnabled {
+            claudeLine.title = "Claude: Off"
+            claudeLine.toolTip = nil
+        } else {
+            let latency = llm.lastLatency > 0 ? String(format: " · %.1fs", llm.lastLatency) : ""
+            claudeLine.title = "Claude: Ready · \(modelShort) via \(backendShort)\(latency)"
+            claudeLine.toolTip = "\(llm.requestCount) requests"
+        }
+        updateIcon()
+    }
+
+    /// Clicked the Claude problem line: say what is wrong in full and offer the fix.
+    @objc private func fixClaude() {
+        guard let problem = claudeProblem else { return }
+        if monitor.llm.backend == .api && monitor.llm.apiKey == nil { editAPIKey(); return }
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Claude isn't working"
+        alert.informativeText = problem + "\n\nTo fix: set a Claude API key (LazyBoard switches to it), or run claude in Terminal, type /login, then press Retry."
+        alert.addButton(withTitle: "Set API Key…")
+        alert.addButton(withTitle: "Retry")
+        alert.addButton(withTitle: "Close")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: editAPIKey()
+        case .alertSecondButtonReturn:
+            monitor.llm.lastError = nil
+            Log.write("llm: error cleared from menu")
+            refreshMenuState()
+        default: break
         }
     }
 
@@ -288,9 +434,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshMenuState()
     }
 
-    @objc private func toggleHold() {
-        monitor.holdOnEnter.toggle()
+    @objc private func selectSendCheck(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let mode = SendCheck(rawValue: raw) else { return }
+        monitor.holdOnEnter = mode != .off
+        if mode != .off { monitor.enterChecks = mode == .enter }
         defaults.set(monitor.holdOnEnter, forKey: "holdOnEnter")
+        defaults.set(monitor.enterChecks, forKey: "enterChecks")
+        Log.write("send check: \(raw)")
         refreshMenuState()
     }
 
@@ -324,7 +474,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let raw = sender.representedObject as? String, let backend = LLMSuggester.Backend(rawValue: raw) else { return }
         monitor.llm.backend = backend
         defaults.set(raw, forKey: "llmBackend")
+        monitor.llm.lastError = nil
+        Log.write("llm: backend \(raw)")
         refreshMenuState()
+        if backend == .api && monitor.llm.apiKey == nil { editAPIKey() }
     }
 
     @objc private func selectModel(_ sender: NSMenuItem) {
@@ -338,11 +491,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
         alert.messageText = "Claude API key"
-        alert.informativeText = "สร้างได้ที่ platform.claude.com → API Keys\nคีย์ถูกเก็บใน Keychain ของเครื่องนี้เท่านั้น เว้นว่างแล้วกดบันทึกเพื่อลบคีย์"
-        alert.addButton(withTitle: "บันทึก")
-        alert.addButton(withTitle: "ยกเลิก")
+        alert.informativeText = "Create one at platform.claude.com → API Keys.\nStored only in this Mac's Keychain. Save an empty field to remove the key."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
         let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
-        field.placeholderString = monitor.llm.apiKey == nil ? "sk-ant-…" : "มีคีย์บันทึกไว้แล้ว (พิมพ์ทับเพื่อเปลี่ยน)"
+        field.placeholderString = monitor.llm.apiKey == nil ? "sk-ant-…" : "A key is saved (type to replace it)"
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
         guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -354,8 +507,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 monitor.llm.apiKey = nil
             }
         } else {
-            KeychainStore.write(value)
+            if !value.hasPrefix("sk-ant-") {
+                Log.write("api key rejected: not an sk-ant- key (\(value.count) chars)")
+                let warn = NSAlert()
+                warn.messageText = "That isn't a Claude API key"
+                warn.informativeText = "Claude API keys start with sk-ant-. Copy one from platform.claude.com → API Keys and paste it with ⌘V."
+                warn.runModal()
+                return
+            }
+            let saved = KeychainStore.write(value)
             monitor.llm.apiKey = value
+            monitor.llm.lastError = saved ? nil : "Couldn't save key to Keychain (works until quit)"
+            // A key was just given: use it, rather than staying on a CLI login that may have expired.
+            if monitor.llm.backend != .api {
+                monitor.llm.backend = .api
+                defaults.set(LLMSuggester.Backend.api.rawValue, forKey: "llmBackend")
+                Log.write("llm: backend api (key saved)")
+            }
         }
         refreshMenuState()
     }
@@ -388,7 +556,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func startMonitor() {
         if !monitor.start() {
             Log.write("event tap could not be created")
-            statusLine.title = "เปิด event tap ไม่สำเร็จ (ลองเปิดแอปใหม่)"
+            statusLine.title = "LazyBoard: Couldn't start (relaunch the app)"
             return
         }
         Log.write("event tap running")

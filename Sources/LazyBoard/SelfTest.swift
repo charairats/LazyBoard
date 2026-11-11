@@ -42,8 +42,8 @@ enum SelfTest {
         expect("F,'", "โมง")
         expect("แล้วนะ iv", "รอ")                                          // iv is a dictionary entry, but รอ wins
         expect(".o", "ใน")   // c]g; in the test run was a typo on top: แลเว, left to the LLM hint
-        // one slipped key (eeuj = ำำี่) inside a long run must still be fixed
-        expect("สวัสดีค่ะ เออเริ่ด 8jteeuj;yoouhso^de]y'mflv[it[[vp^j8jt", "ค่ะำำี่วันนี้หนูกำลังทดสอบระบบอยู่ค่ะ")
+        // one slipped key (eeuj = ำำี่) leaves something that is not Thai words: left to the LLM check, never converted
+        expect("สวัสดีค่ะ เออเริ่ด 8jteeuj;yoouhso^de]y'mflv[it[[vp^j8jt", nil)
         expect("8jt ;yoouhso^de]y'mflv[it[[vp^j8jt", "ค่ะ วันนี้หนูกำลังทดสอบระบบอยู่ค่ะ")
 
         print("\n== Thai layout, meant English ==")
@@ -105,7 +105,13 @@ enum SelfTest {
 
         print("\n== multi-line buffers ==")
         expect("บรรทัดแรก journey\nmujgdujp;-hv'", "ที่เกี่ยวข้อง")
-        check("LLM segment is the last line only", LLMSuggester.segment(of: "line one here\nsecond line  ") == "second line")
+        check("LLM segment keeps every line", LLMSuggester.segment(of: "line one here\nsecond line \n ") == "line one here\nsecond line")
+        let thaiParagraph = String(repeating: "ก", count: 400) + " ท้าย"
+        check("LLM segment keeps a long Thai paragraph", LLMSuggester.segment(of: thaiParagraph) == thaiParagraph)
+        let endless = String(repeating: "ก", count: 2000)
+        check("LLM segment over the limit keeps the limit", LLMSuggester.segment(of: endless).unicodeScalars.count == LLMSuggester.maxSegmentKeys)
+        check("last line", LLMSuggester.lastLine(of: "one\ntwo three") == "two three")
+        check("layout hints cross lines", LLMSuggester.layoutHints(for: "hello\nหแรพยะ")["หแรพยะ"] != nil)
 
         print("\n== thai typo rules ==")
         for (bad, good) in [("เป้น", "เป็น"), ("เป้นไร", "เป็นไร"), ("ก้", "ก็"), ("เเล้ว", "แล้ว"), ("ไม๋", "ไม่"), ("เด้ก", "เด็ก"), ("เช้ค", "เช็ค")] {
@@ -120,7 +126,7 @@ enum SelfTest {
         check("options show only the differing word", multi[0].first(where: \.emphasised)?.text == "ต่อให้" && multi[1].first(where: \.emphasised)?.text == "ต้องให้",
               multi.map { $0.map { ($0.emphasised ? "[" : "") + $0.text + ($0.emphasised ? "]" : "") }.joined() }.joined(separator: " | "))
         let single = SuggestionPanel.changedWords(from: "กำลังทดสอบคียืบอด ต้อให้ suggest", to: "กำลังทดสอบคีย์บอร์ด ต้องให้ suggest")
-        check("changed words emphasised", single.filter(\.emphasised).map(\.text).joined() == "กำลังทดสอบคีย์บอร์ด ต้องให้",
+        check("changed words emphasised", single.filter(\.emphasised).map(\.text).joined() == "คีย์บอร์ดต้อง",
               single.map { ($0.emphasised ? "[" : "") + $0.text + ($0.emphasised ? "]" : "") }.joined())
 
         print("\n== key events after a layout switch ==")
@@ -155,6 +161,101 @@ enum SelfTest {
         check("off adds nothing to the request", !LLMSuggester.userMessage(for: "ส่งงานด้วย").contains("polite"))
         check("on names the particle", LLMSuggester.userMessage(for: "ส่งงานด้วย", polite: .kha).contains("\"polite\":\"ค่ะ\""))
 
+        print("\n== request JSON ==")
+        let slashes = LLMSuggester.userMessage(for: "to do / in progress/done")
+        check("slashes reach the model unescaped", slashes.contains("to do / in progress/done") && !slashes.contains("\\/"), slashes)
+
+        print("\n== enter sends at once when every word is real ==")
+        for s in ["ส่ง PR แล้วนะ รอ review ด้วยค่ะ", "วันนี้หนูกำลังทดสอบระบบอยู่ค่ะ", "to do / in progress/done",
+                  "ดูที่ https://example.com/path ได้เลย", "deploy ขึ้น staging แล้ว v1.2.3", "แก้ใน KeyMonitor.swift แล้วนะ",
+                  "เปิด LazyBoard บน iPhone", "ส่งPRแล้ว", "ok 555 👍", "ขอบคุณมากนะคะ"] {
+            check("looks fine: \(s)", LLMSuggester.looksFine(s))
+        }
+        for s in ["fix the corretion please", "ส่งงานแล้วนะค่ะ", "เป้นอะไรมากมั้ย", "กำลังทดสอบคียืบอด", "อัปเดต พำฟกทำ กับ",
+                  "ok mujgdujp;-hv'", "เเล้วเจอกัน"] {
+            check("goes to Claude: \(s)", !LLMSuggester.looksFine(s))
+        }
+
+        print("\n== why Enter waits, and what Claude changed ==")
+        let english = LLMSuggester.doubts(in: "fix the corretion please")
+        check("doubt: unknown English word", english.count == 1 && english[0].word == "corretion" && english[0].why == .english, "\(english)")
+        check("doubt: Thai typo rule", LLMSuggester.doubts(in: "ส่งงานแล้วนะค่ะ").first?.why == .typo)
+        let thaiDoubts = LLMSuggester.doubts(in: "วันนี้กำลังทดสอบคียืบอด")
+        check("doubt: only the unknown Thai pieces", !thaiDoubts.isEmpty && thaiDoubts.allSatisfy { $0.why == .thai && !$0.word.contains("กำลัง") },
+              thaiDoubts.map(\.word).joined(separator: "|"))
+        check("doubt: wrong layout", LLMSuggester.doubts(in: "อัปเดต พำฟกทำ กับ").first?.why == .layout)
+        check("ส sits next to ว", KeyMap.thaiNeighbours["ส"]?.contains("ว") == true)
+        check("เสลา is one key from เวลา", LLMSuggester.commonNeighbour(of: "เสลา") == "เวลา")
+        let slip = LLMSuggester.doubts(in: "ขอความแม่นเพิ่ม แลกกับเสลานิดหน่อยเราว่าคุ้มนะ")
+        check("doubt: real word one key from a common one", slip.contains { $0.word == "เสลา" && $0.why == .nearCommon }, "\(slip)")
+        check("common words are not near-common", LLMSuggester.commonNeighbour(of: "เวลา") == nil)
+        // Odd fragments that start a quiet check on the next space (2026-11-04).
+        for s in ["สฟ", "สเ", "าส", "ภาาษา", "lllflfu8tj"] {
+            check("odd word doubted: \(s)", !LLMSuggester.doubts(in: s).isEmpty, "\(LLMSuggester.doubts(in: s))")
+        }
+        let chat = LLMSuggester.doubts(in: "สวัสดีค่ะ ดีงับ dja ดีค้าบ")
+        check("chat slang fine, only dja is odd", chat.map(\.word) == ["dja"], "\(chat)")
+        check("slipped key doubted: ใก้ใช้ (ห -> ก)", !LLMSuggester.doubts(in: "แก้ ใก้ใช้ หน่อย").isEmpty, "\(LLMSuggester.doubts(in: "แก้ ใก้ใช้ หน่อย"))")
+        check("real word not doubted as a layout slip: หน่อย", LLMSuggester.doubts(in: "แก้ไขหน่อย หน่อย").isEmpty, "\(LLMSuggester.doubts(in: "แก้ไขหน่อย หน่อย"))")
+        check("whole word not doubted: สเตตัส", LLMSuggester.doubts(in: "สเตตัส").isEmpty, "\(LLMSuggester.doubts(in: "สเตตัส"))")
+        // Found while testing in chat on 2026-11-03.
+        let review = d.suggest(buffer: "ส่ง PR แล้วนะ รอ พำรำรไ ")
+        check("รอ stays Thai beside a mistyped English word", review?.replacement == "reieiw " && review?.scalarCount == 7,
+              "got \(review.map { "\"\($0.replacement)\" (-\($0.scalarCount))" } ?? "nil")")
+        expect("/yj':hkp", "ฝั่งซ้าย", .englishToThai)
+        expect("์ญฉ", "NPC", .thaiToEnglish)
+        check("doubt: Thai keys with digits are not code", LLMSuggester.doubts(in: "gliH0ch]loj8tjt").first?.why == .layout)
+        check("doubt: Thai keys starting with /", LLMSuggester.doubts(in: "/yj':hkp ฝั่งขวาตัวเราค่ะ").first?.why == .layout)
+        for s in ["useState กับ useEffect", "ดูที่ https://example.com/a/b ได้เลย", "/clear แล้วเริ่มใหม่", "deploy v1.2.3 แล้ว"] {
+            check("no layout doubt: \(s)", !LLMSuggester.doubts(in: s).contains { $0.why == .layout }, "\(LLMSuggester.doubts(in: s))")
+        }
+        expect("ivcxx", "รอแปป", .englishToThai)               // the spell checker passes ivcxx as Roman numerals
+        expect("ok ivcxx ", "รอแปป ", .englishToThai)
+        expect("w,", nil)                                       // two-key slang (ไม) is not forced
+        // Tech words typed on the Thai layout, from the 2026-11-03 data.
+        for (thai, english) in [("พำยน", "repo"), ("ยีห้", "push"), ("ยีสส", "pull"), ("ฟยร", "api"),
+                                ("แะพส", "ctrl"), ("แทก", "cmd"), ("าคห", "k8s"),
+                                ("ดำฟะีพำฝิีรสกขำหรท", "feature/build-esim"), ("ฑฎฤฏ?ฎใทก", "README.md"),
+                                ("สำอำสหใทฟปศำอำส", "levels.maxLevel")] {
+            expect("ดู \(thai) ", english + " ", .thaiToEnglish)
+        }
+        expect("ทดสอบ สocal ", "local ", .thaiToEnglish)        // switched one key into the word
+        expect("เข้า สogin ", "login ", .thaiToEnglish)
+        // ทอย (mvp) and หระ (sit) are Thai dictionary words: left for Claude to judge.
+        for s in ["ดูหนังกัน ", "ไปกินข้าว ", "ฝนตก ", "ในห้อง ", "พี่จีน ", "เพราะว่า ", "ดู ทอย ", "ดู หระ "] { expect(s, nil) }
+        // Roman numerals are typed in capitals; lowercase ones are Thai keys.
+        check("iv is not English", !d.isEnglishWord("iv"))
+        check("ivcxx is not English", !d.isEnglishWord("ivcxx"))
+        check("IV is English", d.isEnglishWord("IV"))
+        for w in ["mid", "mix", "civic", "did", "ill"] { check("\(w) stays English", d.isEnglishWord(w)) }
+        expect("ส่ง PR แล้วนะ iv ", "รอ ", .englishToThai)
+        expect("รอ IV ", nil)
+        for s in ["รอแปป รอแพพ", "เริ่ด", "ปังมาก จึ้งมาก ฉ่ำ", "ผิดบาน เลย", "ได้ป่าว ค้าบ", "ทำไง งับ"] {
+            check("slang looks fine: \(s)", LLMSuggester.looksFine(s), "\(LLMSuggester.doubts(in: s))")
+        }
+        var unsafeSlang: [String] = []
+        for w in Detector.slangThai where d.suggest(buffer: w) != nil { unsafeSlang.append(w) }
+        check("no slang word is turned into English", unsafeSlang.isEmpty, unsafeSlang.joined(separator: " "))
+        check("reply reads unsure", LLMSuggester.reply(from: ["fixed": "x", "alternatives": [String](), "unsure": true])?.unsure == true)
+        check("reply without unsure is sure", LLMSuggester.reply(from: ["fixed": "x"])?.unsure == false)
+        let pairs = WordLog.changedPairs(from: "ส่ง PR แล้วนะค่ะ fix the corretion", to: "ส่ง PR แล้วนะคะ fix the correction")
+        check("changed pairs", pairs.count == 2 && pairs[1] == WordLog.Pair(from: "corretion", to: "correction"), "\(pairs)")
+        check("shape: thai-mark", WordLog.shape(pairs[0]) == "thai-mark", WordLog.shape(pairs[0]))
+        check("shape: spelling", WordLog.shape(pairs[1]) == "spelling")
+        check("shape: layout", WordLog.shape(WordLog.Pair(from: "w,jwfh", to: "ไม่ได้")) == "layout")
+        check("shape: spacing", WordLog.shape(WordLog.Pair(from: "ok,", to: "ok")) == "spacing")
+        check("no pairs when nothing changed", WordLog.changedPairs(from: "เหมือนเดิม ok", to: "เหมือนเดิม ok").isEmpty)
+
+        print("\n== fix set against what was typed ==")
+        check("tokens join back to the text", SuggestionPanel.tokens("ส่งงานแล้วนะ ต่อให้ suggest!").joined() == "ส่งงานแล้วนะ ต่อให้ suggest!")
+        let thaiDiff = SuggestionPanel.changedWords(from: "วันนี้หนูกำลังทดสอบคียืบอดอยู่ค่ะ", to: "วันนี้หนูกำลังทดสอบคีย์บอร์ดอยู่ค่ะ")
+        check("only the changed Thai word is emphasised", !thaiDiff.first!.emphasised && thaiDiff.filter(\.emphasised).map(\.text).joined().hasPrefix("คีย์"),
+              thaiDiff.map { ($0.emphasised ? "[" : "") + $0.text + ($0.emphasised ? "]" : "") }.joined())
+        let long = String(repeating: "ข้อความยาวมาก ", count: 30)
+        let squeezed = SuggestionPanel.condensed(SuggestionPanel.changedWords(from: long + "ต่อให้", to: long + "ต้องให้"))
+        check("long unchanged text is shortened", squeezed.reduce(0) { $0 + $1.text.count } < 80 && squeezed.contains { $0.emphasised && $0.text.hasPrefix("ต้อง") },
+              squeezed.map(\.text).joined())
+
         print("\n== typing test scoring ==")
         check("identical = 100%", TypingTest.accuracy(typed: "สวัสดีค่ะ", target: "สวัสดีค่ะ") == 1)
         check("empty typed = 0%", TypingTest.accuracy(typed: "", target: "abc") == 0)
@@ -162,6 +263,43 @@ enum SelfTest {
         check("two swapped letters ≈ 82%", abs(one - (1 - 2.0 / 11.0)) < 0.001, String(format: "%.3f", one))
         check("trailing space ignored", TypingTest.accuracy(typed: "ส่ง PR แล้ว ", target: "ส่ง PR แล้ว") == 1)
         check("letter case ignored", TypingTest.accuracy(typed: "ส่ง pr แล้วนะ รอ review", target: "ส่ง PR แล้วนะ รอ review") == 1)
+
+        print("\n== enter while checking ==")
+        check("double press still waits", !KeyMonitor.enterSendsWhileChecking(elapsed: 0.5))
+        check("later enter sends without waiting", KeyMonitor.enterSendsWhileChecking(elapsed: 4))
+
+        print("\n== tab after a fix ==")
+        check("double press ignored", KeyMonitor.tabIsAccidental(sinceFix: 0.2, repeated: false))
+        check("held key ignored", KeyMonitor.tabIsAccidental(sinceFix: 1.0, repeated: true))
+        check("deliberate second tab swaps", !KeyMonitor.tabIsAccidental(sinceFix: 1.0, repeated: false))
+        check("tab long after a fix is a normal tab", !KeyMonitor.tabIsAccidental(sinceFix: 3600, repeated: true))
+
+        print("\n== word check on both sides ==")
+        expect("gfjo", "เด่น", .englishToThai)
+        expect("gfbo", "เดิน", .englishToThai)
+        expect("Fff", "โดด", .englishToThai)
+        expect("iu[", "รีบ", .englishToThai)
+        expect("Fff gfjo gfbo ", "โดด เด่น เดิน ", .englishToThai)
+        expect("cloudfailre ", nil)
+        expect("cloudflare ", nil)
+        expect("relocator ", nil)
+        expect("cosmetic: ", nil)
+        expect("cosmetic; ", nil)
+        expect("description: ", nil)
+        expect("key:value ", nil)
+        expect("name=value ", nil)
+        expect("[cosmetic] ", nil)
+        expect("input/output ", nil)
+        expect("and/or ", nil)
+        expect("lazyboard ", nil)
+        expect("กอกก", nil)
+        expect("กอขกก", nil)
+        expect("กกขกอ", nil)
+        expect("html", nil)
+        expect("hello", nil)
+        expect("df ", nil)
+        expect("django ", nil)
+        expect("canva ", nil)
 
         print("\n\(failures == 0 ? "ALL PASSED" : "\(failures) FAILED")")
         return failures == 0 ? 0 : 1

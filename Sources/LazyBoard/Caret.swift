@@ -15,6 +15,13 @@ enum Caret {
         return point
     }
 
+    /// The focused text box in Cocoa screen coordinates, when it is box-sized (a chat input, not a whole document).
+    static func focusedFieldFrame() -> NSRect? {
+        guard let element = focusedElement(), isText(element), let f = frame(of: element), onScreen(f),
+              f.height <= 240, f.width >= 120, let primary = NSScreen.screens.first else { return nil }
+        return NSRect(x: f.minX, y: primary.frame.height - f.maxY, width: f.width, height: f.height)
+    }
+
     /// Switch on the accessibility tree of a newly active app, so the first popup there can already find the caret.
     static func prepare(_ app: NSRunningApplication) {
         _ = focusedElement(in: app)
@@ -26,7 +33,22 @@ enum Caret {
             let element = focusedElement(in: app)
             let role = element.flatMap { axValue($0, kAXRoleAttribute) as? String } ?? "none"
             let (point, source) = locate(in: app)
-            print("\(app.bundleIdentifier ?? "app"): role \(role), via \(source) at \(Int(point.x)),\(Int(point.y))")        }
+            print("\(app.bundleIdentifier ?? "app"): role \(role), via \(source) at \(Int(point.x)),\(Int(point.y)), keys ignored: \(keysAreNotTyping(in: app))")        }
+    }
+
+    /// True when keys in the front app are surely not text: a game, or a web page with no input focused.
+    /// An unknown focus stays false, because Electron apps often report nothing while the user is typing.
+    static func keysAreNotTyping() -> Bool {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return false }
+        return keysAreNotTyping(in: app)
+    }
+
+    private static func keysAreNotTyping(in app: NSRunningApplication) -> Bool {
+        if let url = app.bundleURL, let category = Bundle(url: url)?.infoDictionary?["LSApplicationCategoryType"] as? String,
+           category.contains("games") { return true }
+        guard let element = focusedElement(in: app), axValue(element, kAXRoleAttribute) as? String == "AXWebArea" else { return false }
+        // The page itself holds focus (a canvas game, say); a designMode document is still editable.
+        return axValue(element, "AXEditableAncestor") == nil
     }
 
     private static var lastSummary = ""
