@@ -162,7 +162,8 @@ final class Detector {
         guard hasStrong, let s = runStart, let d = direction else { return nil }
         let tail = scalars[s...]
         return Suggestion(scalarCount: tail.count,
-                          replacement: KeyMap.convert(tail, direction: d),
+                          replacement: d == .thaiToEnglish ? KeyMap.capitalizingAcronyms(KeyMap.convert(tail, direction: d))
+                                                           : KeyMap.convert(tail, direction: d),
                           direction: d)
     }
 
@@ -200,109 +201,62 @@ final class Detector {
 
     // MARK: English layout → Thai
 
+    /// `isLast` is kept for callers but no longer loosens anything: space, Enter and a new line judge a word alike.
     private func englishToThaiVerdict(_ word: String, _ scalars: [Unicode.Scalar], isLast: Bool) -> WordVerdict {
         if scalars.allSatisfy({ (0x30...0x39).contains($0.value) }) { return .none }
         // ฝ sits on the / key, so /yj':hkp is ฝั่งซ้าย; only a path with more slashes is surely not Thai.
         if word.contains("://") || word.contains("@") || (word.hasPrefix("/") && word.dropFirst().contains("/")) || word.hasPrefix("~") { return .none }
+        // R1, source: a real English word stays English, whatever its keys spell (me is ทำ on the Thai layout).
+        if isEnglishWord(word) { return .none }
 
         let thai = Array(KeyMap.convert(scalars, direction: .englishToThai).unicodeScalars)
         let thaiCount = thai.filter(KeyMap.isThai).count
         guard Double(thaiCount) / Double(thai.count) >= 0.8 else { return .none }
-        // Thai has no spaces, so one slipped key inside a long run must not hide the whole run.
-        let violations = ThaiOrtho.violations(thai)
-        let startsClean = ThaiOrtho.classify(thai[0]) == .consonant || ThaiOrtho.classify(thai[0]) == .leading
-        let tolerated = (thai.count >= 8 && startsClean) ? max(1, thai.count / 12) : 0
-        guard violations <= tolerated else { return .none }
-
         let thaiString = String(String.UnicodeScalarView(thai))
-        let hasVowel = ThaiOrtho.hasVowelOrTone(thai)
-        let englishOK = isEnglishWord(word)
-        let lenient = isLast || (scalars.count <= 2 && !englishOK)
         let isCommon = Self.commonShortThai.contains(thaiString) || Self.slangThai.contains(thaiString)
-        // Never turn anything into Thai that is not Thai words: cloudfailre -> แสนีกดฟรสพำ.
-        guard isCommon || Self.isRealThai(thaiString) else { return .none }
+        // R1, target: never turn anything into Thai that is not Thai words (cloudfailre -> แสนีกดฟรสพำ).
+        guard isCommon || Words.realThai(thaiString) else { return .none }
 
-        // Two-key common Thai words whose keys happen to spell a dictionary entry (iv = รอ, mu = ที).
-        // Everyday words only: two-key slang (w, = ไม) is too easy to hit by accident.
-        if Self.commonShortThai.contains(thaiString), scalars.count <= 2, !Self.knownEnglish.contains(word.lowercased()) {
+        let hasVowel = ThaiOrtho.hasVowelOrTone(thai)
+        // Two-key everyday words (iv = รอ, .o = ใน). Two-key slang (w, = ไม) is too easy to hit by accident.
+        if Self.commonShortThai.contains(thaiString), scalars.count <= 2 {
             return WordVerdict(direction: .englishToThai, confidence: .strong)
         }
-        // An everyday or slang word of four keys or more, even when the spell checker passes the keys
-        // (ivcxx reads as Roman numerals, but it is รอแปป).
-        if isCommon, scalars.count >= 4, !Self.knownEnglish.contains(word.lowercased()) {
+        if scalars.count >= 4 || (hasVowel && isCommon) {
             return WordVerdict(direction: .englishToThai, confidence: .strong)
         }
-        if !englishOK && (scalars.count >= 4 || (hasVowel && isCommon)) {
-            return WordVerdict(direction: .englishToThai, confidence: .strong)
-        }
-        // A real English word in the middle of the run ends it, unless it is also a common Thai word.
-        if englishOK && !lenient && !isCommon { return .none }
-        if hasVowel || !englishOK || lenient || isCommon {
-            return WordVerdict(direction: .englishToThai, confidence: .weak)
-        }
-        return .none
+        return WordVerdict(direction: .englishToThai, confidence: .weak)
     }
 
     // MARK: Thai layout → English
 
     private func thaiToEnglishVerdict(_ word: String, _ scalars: [Unicode.Scalar], isLast: Bool) -> WordVerdict {
-        // A word we know is Thai stays Thai, whatever its keys spell (รอแปป = ivcxx).
-        if Self.commonShortThai.contains(word) || Self.slangThai.contains(word) { return .none }
+        // R1, source: real Thai stays Thai, whatever its keys spell (รอแปป = ivcxx, ฟอร์ม = aviN, คุม = 86,).
+        if Self.commonShortThai.contains(word) || Self.slangThai.contains(word) || Words.realThai(word) { return .none }
         let english = KeyMap.convert(scalars, direction: .thaiToEnglish)
         // Digits typed on the Thai layout: "ๅจ" is 10, "ๅจ.๒" is 10.2 … (two or more keys).
-        if scalars.count >= 2, english.range(of: "^[0-9][0-9.,:%/-]*$", options: .regularExpression) != nil {
+        if scalars.count >= 2, Words.realNumber(english) {
             return WordVerdict(direction: .thaiToEnglish, confidence: .strong)
         }
         // Branch names, file names, paths (feature/build-esim, README.md, k8s): every part a word we know.
-        let devToken = isDevToken(english)
-        if devToken, !Self.isRealThai(word) {
+        if Words.realDevToken(english) {
             return WordVerdict(direction: .thaiToEnglish, confidence: .strong)
         }
         guard english.range(of: "^[A-Za-z]+(?:['-][A-Za-z]+)*[.,!?]?$", options: .regularExpression) != nil else { return .none }
         let core = english.trimmingCharacters(in: trimSet)
+        // R1, target: only a real English word is written. English-shaped keys (reieiw, dploy, gik.shoeg-hk) are a
+        // hint for Claude, never written over the text (R3).
+        guard core.count >= 2, isEnglishWord(core) else { return .none }
 
         let thaiValid = ThaiOrtho.isValid(scalars)
         let thaiHasVowel = ThaiOrtho.hasVowelOrTone(scalars)
-        let englishOK = core.count >= 2 && isEnglishWord(core)
-        let englishHasVowel = core.lowercased().contains { "aeiouy".contains($0) }
-        let lenient = isLast || (scalars.count <= 2 && !englishOK)
-
-        if englishOK && (!thaiValid || (!thaiHasVowel && core.count >= 4)) {
+        // Broken Thai spelling (สนเรื = login), a longer word, an acronym (ืยแ = npc, ญพ = PR, ์ญฉ = NPC), or
+        // three letters or more whose keys are no Thai word (ยีห้ = push): enough on its own.
+        if !thaiValid || !thaiHasVowel || core.count >= 3 || KeyMap.acronyms[core.lowercased()] != nil
+            || scalars.contains(where: { KeyMap.shiftLayerThai.contains($0) }) {
             return WordVerdict(direction: .thaiToEnglish, confidence: .strong)
         }
-        // A dictionary word of 5+ letters spelled by the keys (หแรพยะ = script) is strong evidence on its own:
-        // Thai words rarely map to letters only, since ว ง บ ล ม ใ ฝ ข ช sit on symbol keys.
-        if englishOK, core.count >= 5, core.allSatisfy({ $0.isLetter }) {
-            return WordVerdict(direction: .thaiToEnglish, confidence: .strong)
-        }
-        // Short acronym typed with Shift on the Thai layout (ญพ = PR): rare consonants, no vowel, a known word.
-        if englishOK, !thaiHasVowel, core.count >= 2, scalars.contains(where: { KeyMap.shiftLayerThai.contains($0) }) {
-            return WordVerdict(direction: .thaiToEnglish, confidence: .strong)
-        }
-        // A real English or dev word whose keys make no Thai word (ยีห้ = push, พำยน = repo): spelling rules
-        // alone could not tell, the Thai dictionary can.
-        if englishOK, core.count >= 3, !Self.isRealThai(word) {
-            return WordVerdict(direction: .thaiToEnglish, confidence: .strong)
-        }
-        // Every key shifted and no Thai reading (์ญฉ = NPC): an acronym typed on the Thai layout.
-        if !thaiValid, (2...6).contains(core.count), core.allSatisfy(\.isUppercase),
-           scalars.allSatisfy({ KeyMap.shiftLayerThai.contains($0) }) {
-            return WordVerdict(direction: .thaiToEnglish, confidence: .strong)
-        }
-        if !thaiValid && englishHasVowel && core.count >= 3 {
-            return WordVerdict(direction: .thaiToEnglish, confidence: .strong)
-        }
-        // Not in the dictionary but English-shaped (readme, dploy, signup) while the Thai side is not real
-        // words either: "พำฟกทำ" -> readme.
-        if !englishOK, core.count >= 5, Self.looksEnglish(core), thaiWordScore(word) < 0.34 {
-            return WordVerdict(direction: .thaiToEnglish, confidence: .strong)
-        }
-        // A real Thai word next to a mistyped English one stays Thai: รอ พำรำรไ must not become "iv review".
-        if thaiValid && (Self.commonShortThai.contains(word) || Self.isRealThai(word)) { return .none }
-        if englishOK || (!thaiValid && (lenient || englishHasVowel)) {
-            return WordVerdict(direction: .thaiToEnglish, confidence: .weak)
-        }
-        return .none
+        return WordVerdict(direction: .thaiToEnglish, confidence: .weak)
     }
 
     /// Cheap English-shape test: has vowels, no run of 4+ consonants, mostly letters.
@@ -330,10 +284,23 @@ final class Detector {
         let w = raw.trimmingCharacters(in: trimSet)
         if w.isEmpty { return false }
         if w.count == 1 { return true }
-        if Self.knownEnglish.contains(w.lowercased()) { return true }
+        if Self.knownEnglish.contains(w.lowercased()) || KeyMap.acronyms[w.lowercased()] != nil { return true }
+        // Only normal letter case is English: lower, Capitalized or ALL CAPS, per hyphen part. The spell checker
+        // passes mixed case (mAKEu = ทฤษฎี, aviN = ฟอร์ม, dE = กฎ), which is Shift-layer Thai, never a word.
+        let caseOK = w.split(separator: "-").allSatisfy { part in
+            let letters = part.filter(\.isLetter)
+            guard let first = letters.first else { return true }
+            let rest = letters.dropFirst()
+            return letters.allSatisfy(\.isLowercase) || letters.allSatisfy(\.isUppercase)
+                || (first.isUppercase && rest.allSatisfy(\.isLowercase))
+        }
+        if !caseOK { return false }
         // Roman numerals only count in capitals (รอ IV): the spell checker passes lowercase iv and ivcxx,
         // which are รอ and รอแปป typed on the English layout.
+        if w.range(of: "^[IVXLCDM]+$", options: .regularExpression) != nil { return true }
         if w.range(of: "^[ivxlcdm]+$", options: .regularExpression) != nil { return Self.romanLetterWords.contains(w) }
+        // ALL CAPS is spelled like the lowercase word (HELLO); the spell checker would pass any capitals.
+        if w.count >= 2, w.allSatisfy({ !$0.isLetter || $0.isUppercase }) { return isEnglishWord(w.lowercased()) }
         // The spell checker passes vowel-less strings as abbreviations (dvdd, dd-dv), so กอกก would become dvdd.
         let parts = w.lowercased().split(separator: "-").map(String.init)
         let spelled = parts.allSatisfy { part in
@@ -359,6 +326,13 @@ final class Detector {
     }()
     private static let longestThaiWord = thaiWords.map { $0.unicodeScalars.count }.max() ?? 0
 
+    /// Everyday two-letter words that may start or end a split even though they are not in commonShortThai
+    /// (นำ+เข้า = นำเข้า, which the word list lacks). Kept short: rare two-letter words can spell almost anything.
+    static let shortSplitWords: Set<String> = [
+        "นำ", "ผล", "รถ", "ปี", "ยา", "ตา", "หู", "ชา", "นม", "คอ", "ขา", "ลม", "ฝน", "สี", "ปู", "งู",
+        "ไฟ", "ใจ", "ใบ", "ตก", "จด", "ยก", "สด", "อก",
+    ]
+
     /// Every Thai run must be a dictionary word or split into them. Rare two-letter words (พำ+กก, แส+นี) can spell
     /// almost anything, so inside a split two-letter words must be everyday ones (มา+ดู).
     static func isRealThai(_ text: String) -> Bool {
@@ -374,7 +348,7 @@ final class Detector {
         for i in 0..<run.count where reachable[i] {
             for j in (i + 2)..<max(i + 2, min(run.count, i + longestThaiWord) + 1) {
                 let piece = String(String.UnicodeScalarView(run[i..<j]))
-                if j - i == 2 ? commonShortThai.contains(piece) : thaiWords.contains(piece) { reachable[j] = true }
+                if j - i == 2 ? commonShortThai.contains(piece) || shortSplitWords.contains(piece) : thaiWords.contains(piece) { reachable[j] = true }
             }
         }
         return reachable[run.count]
@@ -407,22 +381,17 @@ extension Detector {
         if wantThai {
             guard scalars.allSatisfy(KeyMap.isMappableASCII), scalars.contains(where: { CharacterSet.letters.contains($0) }),
                   !scalars.allSatisfy({ (0x30...0x39).contains($0.value) }) else { return nil }
+            // R1: a real English word stays (caplock, hello); only real Thai is written (.secret is not ใหำแพำะ).
             if d.isEnglishWord(word) { return nil }
-            let thai = Array(KeyMap.convert(scalars, direction: .englishToThai).unicodeScalars)
-            let thaiCount = thai.filter(KeyMap.isThai).count
-            guard Double(thaiCount) / Double(thai.count) >= 0.8, ThaiOrtho.hasVowelOrTone(thai),
-                  ThaiOrtho.violations(thai) <= max(1, thai.count / 6) else { return nil }
-            let text = String(String.UnicodeScalarView(thai))
-            // Only ever write real Thai over the text: a file name such as .secret must not become ใหำแพำะ.
-            guard isRealThai(text) else { return nil }
+            let text = KeyMap.convert(scalars, direction: .englishToThai)
+            guard Words.realThai(text) else { return nil }
             return text
         }
-        guard KeyMap.isThaiLayoutWord(scalars), !thaiWords.contains(word) else { return nil }
-        if ThaiOrtho.isValid(scalars) && isRealThai(word) { return nil }
+        // R1: real Thai stays (ภาษา, เราให้นำเข้า); only a real English word, number or dev token is written.
+        guard KeyMap.isThaiLayoutWord(scalars), !Words.realThai(word) else { return nil }
         let english = KeyMap.convert(scalars, direction: .thaiToEnglish)
-        guard english.range(of: "^[A-Za-z0-9][A-Za-z0-9'.-]*$", options: .regularExpression) != nil else { return nil }
-        let core = english.trimmingCharacters(in: CharacterSet(charactersIn: ".,'-"))
-        guard core.count >= 2, d.isEnglishWord(core) || looksEnglish(core) else { return nil }
-        return english
+        guard english.range(of: "^[A-Za-z0-9][A-Za-z0-9'.-]*$", options: .regularExpression) != nil,
+              Words.realEnglishTarget(english) else { return nil }
+        return KeyMap.capitalizingAcronyms(english)
     }
 }

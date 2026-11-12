@@ -100,6 +100,29 @@ enum KeyMap {
         usToThai[s] != nil
     }
 
+    /// Acronyms: real English for every check (npc has no vowel, so the spell checker cannot vouch for it), and
+    /// written in capitals when a layout fix spells one out (keys typed without Shift give llm, the writer meant LLM).
+    static let acronyms: [String: String] = Dictionary(uniqueKeysWithValues: [
+        "llm", "api", "pr", "ui", "ux", "ai", "ml", "cli", "url", "sql", "css", "html", "json", "pdf", "csv",
+        "ci", "qa", "gpu", "cpu", "ram", "ssd", "aws", "gcp", "sdk", "ide", "dns", "jwt", "mcp",
+        "npc", "fps", "rpg", "mmo", "hp", "mp", "xp", "dps", "pvp", "pve", "gm",
+    ].map { ($0, $0.uppercased()) } + [("ios", "iOS")]
+        // Known, but usually written in lowercase (cd src, user id, ok, https://): kept as typed.
+        + ["ok", "id", "cd", "os", "http", "https", "ssh"].map { ($0, $0) })
+
+    /// Writes known acronyms in capitals, word by word: only the acronym word itself changes (cd src stays cd src).
+    /// Words typed with Shift (any capital) stay as typed.
+    static func capitalizingAcronyms(_ text: String) -> String {
+        let trim = CharacterSet(charactersIn: ".,'-")
+        return text.split(separator: " ", omittingEmptySubsequences: false).map { piece -> String in
+            let word = String(piece)
+            guard word == word.lowercased() else { return word }
+            let core = word.trimmingCharacters(in: trim)
+            guard let caps = acronyms[core], caps != core, let r = word.range(of: core) else { return word }
+            return word.replacingCharacters(in: r, with: caps)
+        }.joined(separator: " ")
+    }
+
     static func convert<S: Sequence>(_ scalars: S, direction: Direction) -> String where S.Element == Unicode.Scalar {
         var out = String.UnicodeScalarView()
         for sc in scalars {

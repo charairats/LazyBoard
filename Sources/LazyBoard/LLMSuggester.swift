@@ -338,7 +338,7 @@ final class LLMSuggester {
     static func layoutHints(for text: String) -> [String: String] {
         let d = Detector.shared
         var hints: [String: String] = [:]
-        for raw in text.split(whereSeparator: { $0 == " " || $0 == "\n" }) {
+        for raw in Words.split(text) {
             let word = String(raw)
             let scalars = Array(word.unicodeScalars)
             guard scalars.count >= 2 else { continue }
@@ -368,7 +368,7 @@ final class LLMSuggester {
                 let shortKnown = core.count >= 2 && d.isEnglishWord(core) && !ThaiOrtho.hasVowelOrTone(scalars)
                     && scalars.contains(where: { KeyMap.shiftLayerThai.contains($0) })
                 if scalars.count >= 3 && (doubtful || englishShaped || d.isEnglishWord(core)) || shortKnown {
-                    hints[word] = english
+                    hints[word] = KeyMap.capitalizingAcronyms(english)
                 }
             }
         }
@@ -422,7 +422,7 @@ final class LLMSuggester {
     static func doubts(in text: String) -> [(word: String, why: Doubt)] {
         let d = Detector.shared
         var found: [(word: String, why: Doubt)] = []
-        for raw in text.split(whereSeparator: { $0 == " " || $0 == "\n" }) {
+        for raw in Words.split(text) {
             let token = String(raw)
             if token.contains("://") || token.contains("@") || token.hasPrefix("~") || token.hasPrefix("#") { continue }
             // File names and identifiers: KeyMonitor.swift, snake_case.
@@ -464,7 +464,10 @@ final class LLMSuggester {
                         // Word breaking does not know slang (ค้าบ -> ค้า + บ): a piece of a slang word in the run is fine.
                         let slangHere = Detector.slangThai.filter { run.contains($0) }
                         found += SuggestionPanel.tokens(run)
-                            .filter { t in commonNeighbour(of: t) != nil && !slangHere.contains { $0.count > t.count && $0.contains(t) } }
+                            // Only a real word is a slip for its neighbour (เสลา for เวลา); a piece ICU cut from a longer
+                            // word (ตัส in สเตตัส) is not.
+                            .filter { t in Detector.thaiWords.contains(t) && commonNeighbour(of: t) != nil
+                                && !slangHere.contains { $0.count > t.count && $0.contains(t) } }
                             .map { ($0, .nearCommon) }
                     }
                 } else if !code {
