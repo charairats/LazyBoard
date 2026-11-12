@@ -42,7 +42,10 @@ enum ThaiTypos {
                 }
             }
         }
-        // นะค่ะ, ไหมค่ะ: the classic wrong tone on the particle.
+        // R1: a spelling change is kept only when the word as typed is not real Thai and the change is
+        // (เดี๋ยว, เส้น and เข้ม are words: they stay; เป้น and ไม๋ are not).
+        if fixed != word, Words.realThai(word) || !Words.realThai(fixed) { fixed = word }
+        // นะค่ะ, ไหมค่ะ: the classic wrong tone on the particle. Both spellings are words: an explicit exception.
         if khaEndings.contains(where: { fixed.hasSuffix($0 + "ค่ะ") }) {
             fixed = String(fixed.dropLast("ค่ะ".count)) + "คะ"
         }
@@ -68,12 +71,12 @@ enum ThaiTypos {
     static func slipFix(_ word: String) -> String? {
         let scalars = Array(word.unicodeScalars)
         guard scalars.count >= 3, scalars.allSatisfy(KeyMap.isThai) else { return nil }
-        if ThaiOrtho.isValid(scalars) && Detector.isRealThai(word) { return nil }
+        if Words.realThai(word) { return nil }
         var found = Set<String>()
         func consider(_ c: [Unicode.Scalar]) {
             guard ThaiOrtho.isValid(c) else { return }
             let text = String(String.UnicodeScalarView(c))
-            if text != word, Detector.isRealThai(text) { found.insert(text) }
+            if text != word, Words.realThai(text) { found.insert(text) }
         }
         for i in scalars.indices {
             if let other = shiftPartner[scalars[i]] {
