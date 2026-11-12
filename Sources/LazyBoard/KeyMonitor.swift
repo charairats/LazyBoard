@@ -499,8 +499,8 @@ final class KeyMonitor {
                 return passThrough
             }
             var fixedFirst = false
-            if let s = autoFixCandidate() ?? intentCandidate() {
-                Log.write("auto layout fix on enter (\(s.scalarCount) keys)")
+            if let s = autoWriteCandidate() {
+                Log.write("auto \(s.direction == nil ? "thai typo" : "layout") fix on enter (\(s.scalarCount) keys)")
                 apply(s, automatic: true)
                 fixedFirst = true
             }
@@ -669,8 +669,8 @@ final class KeyMonitor {
 
     private func newline(keyCode: Int, flags: CGEventFlags, passThrough: Unmanaged<CGEvent>) -> Unmanaged<CGEvent>? {
         var fixedFirst = false
-        if let s = autoFixCandidate() ?? intentCandidate() {
-            Log.write("auto layout fix on newline (\(s.scalarCount) keys)")
+        if let s = autoWriteCandidate() {
+            Log.write("auto \(s.direction == nil ? "thai typo" : "layout") fix on newline (\(s.scalarCount) keys)")
             apply(s, automatic: true)
             fixedFirst = true
         }
@@ -715,7 +715,7 @@ final class KeyMonitor {
             return
         }
         let line = String(String.UnicodeScalarView(buffer.unicodeScalars.dropLast()))
-        guard !line.hasSuffix(" "), let word = line.split(whereSeparator: { $0 == " " || $0 == "\n" }).last else { return }
+        guard !line.hasSuffix(" "), let word = Words.split(line).last else { return }
         let doubts = LLMSuggester.doubts(in: String(word))
         guard !doubts.isEmpty else { return }
         quietCheckDue = true
@@ -739,16 +739,25 @@ final class KeyMonitor {
                           alternatives: Array(options.dropFirst()), original: original + extra)
     }
 
-    /// The word just finished (buffer ends with one space), spelled with a classic Thai slip.
+    /// The word just finished (before the trailing space, if any), spelled with a classic Thai slip.
     private func thaiTypoCandidate() -> Suggestion? {
         let scalars = Array(buffer.unicodeScalars)
-        guard scalars.last == " ", scalars.count >= 2 else { return nil }
-        var start = scalars.count - 1
+        let trailing = scalars.last == " " ? 1 : 0
+        guard scalars.count > trailing else { return nil }
+        var start = scalars.count - trailing
         while start > 0, scalars[start - 1] != " ", scalars[start - 1] != "\n" { start -= 1 }
-        let word = String(String.UnicodeScalarView(scalars[start..<(scalars.count - 1)]))
+        let word = String(String.UnicodeScalarView(scalars[start..<(scalars.count - trailing)]))
         guard !word.isEmpty, !detector.ignoredWords.contains(word), let fixed = ThaiTypos.fix(word),
               !Caret.keysAreNotTyping() else { return nil }
-        return Suggestion(scalarCount: word.unicodeScalars.count + 1, replacement: fixed + " ", direction: nil, source: .layout)
+        return Suggestion(scalarCount: word.unicodeScalars.count + trailing, replacement: fixed + (trailing == 1 ? " " : ""),
+                          direction: nil, source: .layout)
+    }
+
+    /// One pipeline for space, Enter and a new line (R6): layout fix, then the layout Caps Lock asked for,
+    /// then a classic Thai slip. Each writes only a real word over one that is not (R1).
+    private func autoWriteCandidate() -> Suggestion? {
+        if let s = autoFixCandidate() ?? intentCandidate() { return s }
+        return autoFixLayout ? thaiTypoCandidate() : nil
     }
 
     /// The current layout suggestion, if it is long enough to be applied without asking.
