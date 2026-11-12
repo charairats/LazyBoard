@@ -306,16 +306,19 @@ enum SelfTest {
             let got = Detector.intentConversion(word, wantThai: thai)
             check("after switch: \(word) -> \(want ?? "kept")", got == want, "got \(got ?? "nil")")
         }
-        // Jeen meant ไปหาตัวเล็กก่อน: the keys give ไปห่ที่ ตัสเล็กก่อน (two slips on top), which is all the layout
-        // can know; the right script then lets Claude fix the slips.
-        intent("wxsjmuj", thai: true, "ไปห่ที่")
-        intent("9ylg]Hddjvo", thai: true, "ตัสเล็กก่อน")
+        // Jeen meant ไปหาตัวเล็กก่อน: the keys give ไปห่ที่ ตัสเล็กก่อน, which are not real Thai, so nothing is
+        // written over the text and Claude's check handles it.
+        intent("wxsjmuj", thai: true, nil)
+        intent("9ylg]Hddjvo", thai: true, nil)
         intent("หนืืำะ", thai: false, "sonnet")
         intent("สสท", thai: false, "llm")
         intent("caplock", thai: true, nil)
         intent("hello", thai: true, nil)
         intent("ภาษา", thai: false, nil)
         intent("2026", thai: true, nil)
+        intent(".secret", thai: true, nil)
+        intent(".scret", thai: true, nil)
+        intent("secret.txt", thai: true, nil)
 
         print("\n== Claude fixes that add or drop whole words ==")
         check("adds คะ", LLMSuggester.addsOrDropsWords(from: "ได้เลย", to: "ได้เลยคะ"))

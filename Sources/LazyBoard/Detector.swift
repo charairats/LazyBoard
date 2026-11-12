@@ -413,8 +413,8 @@ extension Detector {
             guard Double(thaiCount) / Double(thai.count) >= 0.8, ThaiOrtho.hasVowelOrTone(thai),
                   ThaiOrtho.violations(thai) <= max(1, thai.count / 6) else { return nil }
             let text = String(String.UnicodeScalarView(thai))
-            // An English-shaped word (letters only, vowels in place) must turn into real Thai to be taken.
-            if scalars.allSatisfy({ CharacterSet.letters.contains($0) }), looksEnglish(word), !isRealThai(text) { return nil }
+            // Only ever write real Thai over the text: a file name such as .secret must not become ใหำแพำะ.
+            guard isRealThai(text) else { return nil }
             return text
         }
         guard KeyMap.isThaiLayoutWord(scalars), !thaiWords.contains(word) else { return nil }
