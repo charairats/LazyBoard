@@ -54,6 +54,7 @@ enum SelfTest {
         expect("บัคนี้เกิดตอน สนเรื", "login", .thaiToEnglish)        // ends in ื: never Thai
         expect("อัปเดท ฑฎฤฏ?ฎ", "README", .thaiToEnglish)             // Shift+M gives "?" on the Thai layout
         expect("ส่ง ญพ", "Pr", .thaiToEnglish)                         // shift-layer acronym
+        expect("เปิด ฟยร ", "API ", .thaiToEnglish)                    // known acronym typed without Shift comes out in capitals
         expect("จากนั้นเราจะทำ ้รขดร", "hi-fi", .thaiToEnglish)          // hyphenated word
         expect("กับ build หแพรยะ", "script", .thaiToEnglish)             // valid-looking Thai, but the keys spell a word
         // หแรพยะ = "scirpt" (layout + transposition): left to the LLM, which gets the hint
@@ -199,11 +200,15 @@ enum SelfTest {
         check("real word not doubted as a layout slip: หน่อย", LLMSuggester.doubts(in: "แก้ไขหน่อย หน่อย").isEmpty, "\(LLMSuggester.doubts(in: "แก้ไขหน่อย หน่อย"))")
         check("whole word not doubted: สเตตัส", LLMSuggester.doubts(in: "สเตตัส").isEmpty, "\(LLMSuggester.doubts(in: "สเตตัส"))")
         // Found while testing in chat on 2026-11-03.
-        let review = d.suggest(buffer: "ส่ง PR แล้วนะ รอ พำรำรไ ")
-        check("รอ stays Thai beside a mistyped English word", review?.replacement == "reieiw " && review?.scalarCount == 7,
-              "got \(review.map { "\"\($0.replacement)\" (-\($0.scalarCount))" } ?? "nil")")
+        // reieiw is not English: nothing is written over it, Claude gets the layout hint instead (R1/R3).
+        expect("ส่ง PR แล้วนะ รอ พำรำรไ ", nil)
+        check("layout hint for พำรำรไ", LLMSuggester.layoutHints(for: "รอ พำรำรไ")["พำรำรไ"] == "reieiw")
         expect("/yj':hkp", "ฝั่งซ้าย", .englishToThai)
         expect("์ญฉ", "NPC", .thaiToEnglish)
+        // Jean, 2026-11-12: เปิดร้าน เอา ืยแ มาวางไว้ — npc typed without Shift, no vowels, still NPC.
+        expect("เปิดร้าน เอา ืยแ ", "NPC ", .thaiToEnglish)
+        let npcHints = LLMSuggester.layoutHints(for: "เปิดร้าน เอา ืยแ มาวางไว้")
+        check("whole text: เปิดร้าน เอา ืยแ มาวางไว้ -> เปิดร้าน เอา NPC มาวางไว้", npcHints == ["ืยแ": "NPC"], "\(npcHints)")
         check("doubt: Thai keys with digits are not code", LLMSuggester.doubts(in: "gliH0ch]loj8tjt").first?.why == .layout)
         check("doubt: Thai keys starting with /", LLMSuggester.doubts(in: "/yj':hkp ฝั่งขวาตัวเราค่ะ").first?.why == .layout)
         for s in ["useState กับ useEffect", "ดูที่ https://example.com/a/b ได้เลย", "/clear แล้วเริ่มใหม่", "deploy v1.2.3 แล้ว"] {
@@ -213,7 +218,7 @@ enum SelfTest {
         expect("ok ivcxx ", "รอแปป ", .englishToThai)
         expect("w,", nil)                                       // two-key slang (ไม) is not forced
         // Tech words typed on the Thai layout, from the 2026-11-03 data.
-        for (thai, english) in [("พำยน", "repo"), ("ยีห้", "push"), ("ยีสส", "pull"), ("ฟยร", "api"),
+        for (thai, english) in [("พำยน", "repo"), ("ยีห้", "push"), ("ยีสส", "pull"), ("ฟยร", "API"),
                                 ("แะพส", "ctrl"), ("แทก", "cmd"), ("าคห", "k8s"),
                                 ("ดำฟะีพำฝิีรสกขำหรท", "feature/build-esim"), ("ฑฎฤฏ?ฎใทก", "README.md"),
                                 ("สำอำสหใทฟปศำอำส", "levels.maxLevel")] {
@@ -311,7 +316,8 @@ enum SelfTest {
         intent("wxsjmuj", thai: true, nil)
         intent("9ylg]Hddjvo", thai: true, nil)
         intent("หนืืำะ", thai: false, "sonnet")
-        intent("สสท", thai: false, "llm")
+        intent("สสท", thai: false, "LLM")                // known acronym comes out in capitals
+        intent("ืยแ", thai: false, "NPC")
         intent("caplock", thai: true, nil)
         intent("hello", thai: true, nil)
         intent("ภาษา", thai: false, nil)
@@ -352,6 +358,57 @@ enum SelfTest {
         for text in ["mujgdujp;-hv'", "หแพรยะ", "ภาาษา"] {
             check("still doubted: \(text)", !LLMSuggester.doubts(in: text).isEmpty)
         }
+
+
+        print("\n== one rule: write only a real word over one that is not (R1-R6) ==")
+        // English words stay English, whatever their keys spell on the Thai layout.
+        for s in ["me ", "tell me ", "send me ", "call me maybe "] { expect(s, nil) }
+        // Real Thai words stay Thai, whatever their keys spell on the English layout.
+        for w in ["ฟอร์ม", "ทฤษฎี", "โฆษณา", "ทัศนะ", "ทำโทษ", "กฎ", "ศร", "คุม", "จม", "คม", "สกปรก", "เทรนด์", "ปอนด์", "สหกรณ์"] {
+            expect(w + " ", nil)
+            expect("กรอก " + w + " ", nil)
+        }
+        // Broken Thai is not written over with English-shaped keys: Claude gets the hint.
+        for w in ["ดีี ", "ทำาน "] { expect(w, nil) }
+        check("mixed case is not English: mAKEu", !d.isEnglishWord("mAKEu"))
+        check("mixed case is not English: aviN", !d.isEnglishWord("aviN"))
+        check("mixed case is not English: dE", !d.isEnglishWord("dE"))
+        for w in ["hello", "Hello", "HELLO", "README", "Pr", "npc", "NPC", "LLM", "hi-fi"] { check("English: \(w)", d.isEnglishWord(w)) }
+        // Jean, 2026-11-12 14:44: เราให้นำเข้า was written over as gik.shoeg-hk after Caps Lock.
+        check("นำเข้า is real Thai", Words.realThai("นำเข้า") && Words.realThai("เราให้นำเข้า"))
+        expect("gik.shoeg-hk ", "เราให้นำเข้า ", .englishToThai)
+        expect("Sprite Studio gik.shoeg-hk ", "เราให้นำเข้า ", .englishToThai)
+        intent("เราให้นำเข้า", thai: false, nil)
+        intent("gik.shoeg-hk", thai: true, "เราให้นำเข้า")
+        intent("ดีี", thai: false, nil)
+        intent("ทำาน", thai: false, nil)
+        intent("เปน", thai: false, nil)
+        expect("ืยแ ", "NPC ", .thaiToEnglish)
+        // Acronyms in capitals, word by word; words usually written in lowercase stay so.
+        check("cd src stays lowercase", KeyMap.capitalizingAcronyms("cd src") == "cd src")
+        check("ok and id stay lowercase", KeyMap.capitalizingAcronyms("ok id") == "ok id")
+        check("only the acronym is capitalised", KeyMap.capitalizingAcronyms("fix the api now") == "fix the API now")
+        // Thai typo rules only touch words that are not real.
+        for w in ["เดี๋ยว", "เดี๋ยวแก้ให้", "เส้น", "เส้นทาง", "เข้ม", "เข้มแข็ง", "อ๋อ", "เจ๋ง", "แจ๋ว", "กระเป๋า", "ลูกเต๋า"] {
+            check("untouched \(w)", ThaiTypos.fix(w) == nil, "got \(ThaiTypos.fix(w) ?? "nil")")
+        }
+        check("เดี๋ยว not doubted as a typo", !LLMSuggester.doubts(in: "เดี๋ยวแก้ให้").contains { $0.why == .typo })
+
+        print("\n== the whole dictionary is safe ==")
+        var turned: [String] = [], retyped: [String] = []
+        for w in Detector.thaiWords {
+            if let s = d.suggest(buffer: w + " ") { turned.append("\(w)→\(s.replacement)") }
+            if !ThaiTypos.khaEndings.contains(where: { w.hasSuffix($0 + "ค่ะ") }), let f = ThaiTypos.fix(w) { retyped.append("\(w)→\(f)") }
+        }
+        check("no Thai dictionary word is written over by a layout fix", turned.isEmpty, "\(turned.count): " + turned.prefix(20).joined(separator: " "))
+        check("no Thai dictionary word is rewritten by a typo rule", retyped.isEmpty, "\(retyped.count): " + retyped.prefix(20).joined(separator: " "))
+        var englishTurned: [String] = []
+        for w in Detector.thaiWords {
+            let keys = KeyMap.convert(w.unicodeScalars, direction: .thaiToEnglish)
+            guard keys.unicodeScalars.allSatisfy({ $0.value < 0x80 }), d.isEnglishWord(keys) else { continue }
+            if let s = d.suggest(buffer: keys + " ") { englishTurned.append("\(keys)→\(s.replacement)") }
+        }
+        check("no English word is written over as Thai", englishTurned.isEmpty, englishTurned.joined(separator: " "))
 
         print("\n\(failures == 0 ? "ALL PASSED" : "\(failures) FAILED")")
         return failures == 0 ? 0 : 1
