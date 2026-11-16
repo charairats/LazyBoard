@@ -135,7 +135,8 @@ final class LLMSuggester {
     its casual spelling (เริ่ด ปัง จึ้ง ฉ่ำ ตึง รอแปป ผิดบาน ป่าว ค้าบ งับ): it is meant, never a typo.
     - "suspects", when present, lists words a local check doubted. Look at each one in its sentence: fix it when \
     it is a slip, including a real word that does not fit the context (หลับ typed for กลับ, เลน for เลย); leave \
-    it as typed when it is fine (a name, slang, a real word that fits). Other words can still need fixing too.
+    it as typed when it is fine (a name, slang, a real word that fits). Other words can still need fixing too. \
+    A real Thai word that is not in "suspects" stays exactly as typed: ที is a word and never becomes ที่.
     - Leave real names, product names, code identifiers, URLs and well-known abbreviations as typed, \
     unless the context makes the intended word obvious.
     - "fixed" is your single best full correction of the whole text. The text may be several sentences or \
@@ -692,12 +693,56 @@ final class LLMSuggester {
     /// A fix that adds or drops a whole real word (คะ put in, ทำ left out) is not a typo fix: the writer's text
     /// stays as typed. Rewrites (emoji, polite) add words on purpose and are left alone.
     func guarded(_ reply: Reply, for segment: String) -> Reply {
-        guard !rewrites else { return reply }
-        let options = reply.options.filter { !Self.addsOrDropsWords(from: segment, to: $0) }
-        guard options.count != reply.options.count else { return reply }
-        Log.write("llm fix dropped: adds or removes words (\(reply.options.count - options.count) of \(reply.options.count))")
+        guard !rewrites, reply.fixed != segment else { return reply }
+        let kept = reply.options.filter { !Self.addsOrDropsWords(from: segment, to: $0) }
+        if kept.count != reply.options.count {
+            Log.write("llm fix dropped: adds or removes words (\(reply.options.count - kept.count) of \(reply.options.count))")
+        }
+        // R1: a real Thai word the local check did not doubt stays as typed (ที is a word: never ที่).
+        let doubted = Self.doubts(in: segment)
+        var options: [String] = []
+        for o in kept {
+            let guardedOption = Self.keepingRealThai(o, original: segment, doubted: doubted)
+            if guardedOption != o { Log.write("llm fix undone: changed a real Thai word") }
+            if guardedOption != segment, !options.contains(guardedOption) { options.append(guardedOption) }
+        }
+        guard options != reply.options else { return reply }
         guard let first = options.first else { return Reply(fixed: segment, alternatives: [], unsure: reply.unsure) }
         return Reply(fixed: first, alternatives: Array(options.dropFirst()), unsure: reply.unsure)
+    }
+
+    /// `fixed` with every changed stretch put back as typed when what was typed is real Thai that the local check
+    /// did not doubt (ที -> ที่, ทีละ -> ที่ละ). Changes to doubted or broken words stay.
+    static func keepingRealThai(_ fixed: String, original: String, doubted: [(word: String, why: Doubt)]) -> String {
+        guard fixed != original else { return fixed }
+        let a = SuggestionPanel.tokens(original), b = SuggestionPanel.tokens(fixed)
+        var table = Array(repeating: Array(repeating: 0, count: b.count + 1), count: a.count + 1)
+        for i in stride(from: a.count - 1, through: 0, by: -1) {
+            for j in stride(from: b.count - 1, through: 0, by: -1) {
+                table[i][j] = a[i] == b[j] ? table[i + 1][j + 1] + 1 : max(table[i + 1][j], table[i][j + 1])
+            }
+        }
+        func protected(_ from: String, _ to: String) -> Bool {
+            let pieces = Words.split(from)
+            guard !pieces.isEmpty, !to.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+            return pieces.allSatisfy { piece in
+                let core = piece.trimmingCharacters(in: .punctuationCharacters)
+                return !core.isEmpty && Words.realThai(core)
+                    && !doubted.contains { d in d.why == .thai ? d.word == core : (d.word.contains(core) || core.contains(d.word)) }
+            }
+        }
+        var out = "", i = 0, j = 0, from = "", to = ""
+        func flush() {
+            out += protected(from, to) ? from : to
+            from = ""; to = ""
+        }
+        while i < a.count || j < b.count {
+            if i < a.count, j < b.count, a[i] == b[j] { flush(); out += a[i]; i += 1; j += 1 }
+            else if j >= b.count || (i < a.count && table[i + 1][j] >= table[i][j + 1]) { from += a[i]; i += 1 }
+            else { to += b[j]; j += 1 }
+        }
+        flush()
+        return out
     }
 
     static func addsOrDropsWords(from original: String, to fixed: String) -> Bool {

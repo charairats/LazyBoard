@@ -336,6 +336,24 @@ enum SelfTest {
         check("English typo kept", !LLMSuggester.addsOrDropsWords(from: "concflict here", to: "conflict here"))
         check("unchanged kept", !LLMSuggester.addsOrDropsWords(from: "โอเค", to: "โอเค"))
 
+        print("\n== Claude fixes never change a real Thai word nobody doubted ==")
+        func keep(_ typed: String, _ claude: String, _ want: String) {
+            let got = LLMSuggester.keepingRealThai(claude, original: typed, doubted: LLMSuggester.doubts(in: typed))
+            check("\(typed) + Claude \(claude) -> \(want)", got == want, "got \(got)")
+        }
+        keep("ที", "ที่", "ที")
+        keep("ทีละ", "ที่ละ", "ทีละ")
+        keep("ทีละอย่าง", "ที่ละอย่าง", "ทีละอย่าง")
+        keep("เดี๋ยวค่อยทำทีหลัง", "เดี๋ยวค่อยทำที่หลัง", "เดี๋ยวค่อยทำทีหลัง")
+        keep("ขอที เป้นไรมาก", "ขอที่ เป็นไรมาก", "ขอที เป็นไรมาก")
+        keep("สนับันนุน หน่อย", "สนับสนุน หน่อย", "สนับสนุน หน่อย")
+        keep("ใช้ไมไ่ด้", "ใช้ไม่ได้", "ใช้ไม่ได้")
+        keep("dfl6j,g]p", "กดสุ่มเลย", "กดสุ่มเลย")
+        keep("ไปก่อนนะค่ะ", "ไปก่อนนะคะ", "ไปก่อนนะคะ")
+        keep("ขอความแม่นเพิ่ม แลกกับเสลานิดหน่อยเราว่าคุ้มนะ", "ขอความแม่นเพิ่ม แลกกับเวลานิดหน่อยเราว่าคุ้มนะ",
+             "ขอความแม่นเพิ่ม แลกกับเวลานิดหน่อยเราว่าคุ้มนะ")
+        keep("concflict here", "conflict here", "conflict here")
+
         print("\n== One slipped key, fixed locally ==")
         func slipCase(_ word: String, _ want: String?) {
             let got = ThaiTypos.slipFix(word)

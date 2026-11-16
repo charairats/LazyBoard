@@ -330,7 +330,7 @@ final class Detector {
     /// (นำ+เข้า = นำเข้า, which the word list lacks). Kept short: rare two-letter words can spell almost anything.
     static let shortSplitWords: Set<String> = [
         "นำ", "ผล", "รถ", "ปี", "ยา", "ตา", "หู", "ชา", "นม", "คอ", "ขา", "ลม", "ฝน", "สี", "ปู", "งู",
-        "ไฟ", "ใจ", "ใบ", "ตก", "จด", "ยก", "สด", "อก",
+        "ไฟ", "ใจ", "ใบ", "ตก", "จด", "ยก", "สด", "อก", "ที",
     ]
 
     /// Every Thai run must be a dictionary word or split into them. Rare two-letter words (พำ+กก, แส+นี) can spell
