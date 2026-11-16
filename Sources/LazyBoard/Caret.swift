@@ -90,9 +90,9 @@ enum Caret {
         enabledPIDs.insert(app.processIdentifier)
         let appElement = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(appElement, 0.3)
+        // Electron and Chromium build their tree for this attribute; native apps ignore it. AXEnhancedUserInterface
+        // is never set: it slows Chrome and breaks window animations and window managers in other apps.
         AXUIElementSetAttributeValue(appElement, "AXManualAccessibility" as CFString, kCFBooleanTrue)
-        // Native apps ignore the attribute above; this one can disturb their windows, so only when nothing is focused.
-        if element == nil { AXUIElementSetAttributeValue(appElement, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue) }
         Log.write("ax: asked \(app.bundleIdentifier ?? "app") to enable accessibility")
         return focusedElementOnce(in: app) ?? element
     }
