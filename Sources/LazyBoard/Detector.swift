@@ -311,6 +311,8 @@ final class Detector {
         if w.range(of: "^[IVXLCDM]+$", options: .regularExpression) != nil { return true }
         if w.range(of: "^[ivxlcdm]+$", options: .regularExpression) != nil { return Self.romanLetterWords.contains(w) }
         // ALL CAPS is spelled like the lowercase word (HELLO); the spell checker would pass any capitals.
+        // A token with no letters (--, '') would pass this test unchanged and recurse forever: it is not a word.
+        if !w.contains(where: \.isLetter) { return false }
         if w.count >= 2, w.allSatisfy({ !$0.isLetter || $0.isUppercase }) { return isEnglishWord(w.lowercased()) }
         // The spell checker passes vowel-less strings as abbreviations (dvdd, dd-dv), so กอกก would become dvdd.
         let parts = w.lowercased().split(separator: "-").map(String.init)

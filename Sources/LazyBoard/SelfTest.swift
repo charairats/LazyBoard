@@ -232,6 +232,7 @@ enum SelfTest {
         check("iv is not English", !d.isEnglishWord("iv"))
         check("ivcxx is not English", !d.isEnglishWord("ivcxx"))
         check("IV is English", d.isEnglishWord("IV"))
+        for t in ["--", "''", "---"] { check("no letters is not English: \(t)", !d.isEnglishWord(t)) }
         for w in ["mid", "mix", "civic", "did", "ill"] { check("\(w) stays English", d.isEnglishWord(w)) }
         expect("ส่ง PR แล้วนะ iv ", "รอ ", .englishToThai)
         expect("รอ IV ", nil)

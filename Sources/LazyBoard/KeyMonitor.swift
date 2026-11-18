@@ -369,6 +369,9 @@ final class KeyMonitor {
         switchIntent = SwitchIntent(at: now, wantThai: !fromThai)
         capsPress = CapsPress(fromThai: fromThai)
         Log.write("caps: tap, \(fromThai ? "english" : "thai")")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            Log.write("caps: 50ms later the layout is \(InputSource.currentIsThai() ? "thai" : "english")")
+        }
         let work = DispatchWorkItem { [weak self] in self?.capsHeld() }
         capsHoldWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.capsHoldTime, execute: work)
