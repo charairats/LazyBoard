@@ -17,6 +17,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     private let excludeItem = NSMenuItem(title: "Disable in This App", action: #selector(toggleExclude), keyEquivalent: "")
     private let autoFixItem = NSMenuItem(title: "Auto-Fix on Space / Enter  (Esc to undo)", action: #selector(toggleAutoFix), keyEquivalent: "")
     private let switchItem = NSMenuItem(title: "Switch Input Source After Fix", action: #selector(toggleSwitch), keyEquivalent: "")
+    private let capsItem = NSMenuItem(title: "Caps Lock Switches Language (hold for CAPS)", action: #selector(toggleCaps), keyEquivalent: "")
+    private var signalSources: [DispatchSourceSignal] = []
     private let llmItem = NSMenuItem(title: "Use Claude", action: #selector(toggleLLM), keyEquivalent: "")
     private let sendCheckItem = NSMenuItem(title: "Check Before Send", action: nil, keyEquivalent: "")
     private let sendCheckMenu = NSMenu()
@@ -58,7 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         migrateOldSettings()
         WordLog.purge()
         defaults.register(defaults: ["enabled": true, "switchLayout": true, "excluded": [String](),
-                                     "autoFix": true, "holdOnEnter": true, "enterChecks": false, "checkWhileTyping": false, "emojiMode": false,
+                                     "autoFix": true, "capsSwitch": true, "holdOnEnter": true, "enterChecks": false, "checkWhileTyping": false, "emojiMode": false,
                                      "llmEnabled": true, "llmModel": LLMSuggester.Model.haiku.rawValue,
                                      "strongModel": LLMSuggester.Model.sonnet.rawValue,
                                      "llmBackend": LLMSuggester.Backend.claudeCLI.rawValue])
@@ -66,6 +68,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         monitor.isEnabled = defaults.bool(forKey: "enabled")
         monitor.switchLayoutAfterFix = defaults.bool(forKey: "switchLayout")
         monitor.autoFixLayout = defaults.bool(forKey: "autoFix")
+        monitor.capsSwitch = defaults.bool(forKey: "capsSwitch")
+        // pkill and logout send SIGTERM: quit properly so Caps Lock goes back to normal.
+        for sig in [SIGTERM, SIGINT, SIGHUP] {
+            signal(sig, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            source.setEventHandler { NSApp.terminate(nil) }
+            source.resume()
+            signalSources.append(source)
+        }
         monitor.holdOnEnter = defaults.bool(forKey: "holdOnEnter")
         monitor.enterChecks = defaults.bool(forKey: "enterChecks")
         monitor.checkWhileTyping = defaults.bool(forKey: "checkWhileTyping")
@@ -107,6 +118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
 
     func applicationWillTerminate(_ notification: Notification) {
         monitor.llm.shutdown()
+        CapsKey.restore()
     }
 
     // MARK: Status item
@@ -135,7 +147,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
 
         // 3. Wrong-layout fixes (works offline, no Claude).
         menu.addItem(Self.header("Wrong Keyboard Fixes (offline)"))
-        add([autoFixItem, switchItem], to: menu)
+        add([autoFixItem, switchItem, capsItem], to: menu)
         menu.addItem(.separator())
 
         // 4. Claude: master switch first, then what it does.
@@ -244,7 +256,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         if item === shadowLine { return false }
         let needsClaude = item === quietItem || item.menu === sendCheckMenu || item.menu === rewriteMenu
         if needsClaude { return monitor.isEnabled && monitor.llm.isEnabled }
-        if item === autoFixItem || item === switchItem || item === llmItem || item === excludeItem { return monitor.isEnabled }
+        if item === autoFixItem || item === switchItem || item === capsItem || item === llmItem || item === excludeItem { return monitor.isEnabled }
         return true
     }
 
@@ -301,6 +313,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         enabledItem.state = monitor.isEnabled ? .on : .off
         switchItem.state = monitor.switchLayoutAfterFix ? .on : .off
         autoFixItem.state = monitor.autoFixLayout ? .on : .off
+        capsItem.state = monitor.capsSwitch ? .on : .off
         quietItem.state = monitor.checkWhileTyping ? .on : .off
         llmItem.state = llm.isEnabled ? .on : .off
 
@@ -451,6 +464,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     @objc private func toggleSwitch() {
         monitor.switchLayoutAfterFix.toggle()
         defaults.set(monitor.switchLayoutAfterFix, forKey: "switchLayout")
+        refreshMenuState()
+    }
+
+    @objc private func toggleCaps() {
+        monitor.capsSwitch.toggle()
+        defaults.set(monitor.capsSwitch, forKey: "capsSwitch")
         refreshMenuState()
     }
 

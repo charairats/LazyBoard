@@ -28,7 +28,9 @@ final class KeyMonitor {
     private var cycle: Cycle?
     private static let cycleWindow: TimeInterval = 6
 
-    var isEnabled = true { didSet { if !isEnabled { reset() } } }
+    var isEnabled = true { didSet { if !isEnabled { reset() }; updateCapsKey() } }
+    /// Caps Lock is the language key: a tap switches Thai/English at once, a hold turns on real Caps Lock.
+    var capsSwitch = true { didSet { updateCapsKey() } }
     var switchLayoutAfterFix = true
     /// Apply a confident wrong-layout fix by itself when a word ends (space) or the line is sent (Enter),
     /// however short the word: this is what lets the user type on one layout and never switch.
@@ -270,6 +272,7 @@ final class KeyMonitor {
         guard tap == nil else { return true }
         let mask: CGEventMask =
             (1 << CGEventType.keyDown.rawValue) |
+            (1 << CGEventType.keyUp.rawValue) |
             (1 << CGEventType.flagsChanged.rawValue) |
             (1 << CGEventType.leftMouseDown.rawValue) |
             (1 << CGEventType.rightMouseDown.rawValue) |
@@ -287,6 +290,9 @@ final class KeyMonitor {
         runLoopSource = source
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
+        updateCapsKey()
+        // A password field hides keys from the tap: give Caps Lock back to macOS while one has focus.
+        secureInputTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.updateCapsKey() }
 
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
@@ -312,6 +318,72 @@ final class KeyMonitor {
         switchIntent = nil
         llm.cancel()
         panel.hide()
+    }
+
+    // MARK: Caps Lock: tap to switch language, hold for upper case
+
+    /// Held this long, Caps Lock is the real Caps Lock (upper case) instead of a language switch.
+    static let capsHoldTime: TimeInterval = 0.4
+    private struct CapsPress {
+        var fromThai: Bool
+        /// Another key went down while Caps Lock was held: a quick switch rolled into typing, not a hold.
+        var typed = false
+    }
+    private var capsPress: CapsPress?
+    private var capsHoldWork: DispatchWorkItem?
+    /// The layout the last press chose, so a quick second tap goes back even before macOS reports the switch.
+    private var lastCapsChoice: (at: Date, thai: Bool)?
+    private var secureInputTimer: Timer?
+
+    /// Remap Caps Lock while it can work (tap running, enabled, no password field); otherwise leave it to macOS.
+    func updateCapsKey() {
+        let want = isRunning && isEnabled && capsSwitch && !IsSecureEventInputEnabled()
+        if want, !CapsKey.isRemapped {
+            CapsKey.remap()
+        } else if !want, CapsKey.isRemapped {
+            capsHoldWork?.cancel()
+            capsPress = nil
+            CapsKey.restore()
+        }
+    }
+
+    /// Caps Lock (arriving as F18) went down or up.
+    private func capsKey(down: Bool, event: CGEvent) {
+        guard down else {
+            capsHoldWork?.cancel()
+            capsHoldWork = nil
+            capsPress = nil
+            return
+        }
+        guard event.getIntegerValueField(.keyboardEventAutorepeat) == 0, capsPress == nil else { return }
+        let now = Date()
+        let fromThai: Bool
+        if let last = lastCapsChoice, now.timeIntervalSince(last.at) < 1 {
+            fromThai = last.thai
+        } else {
+            fromThai = InputSource.currentIsThai()
+        }
+        // Switch on key down, not key up: the next letter is often pressed before Caps Lock is let go.
+        InputSource.select(thai: !fromThai)
+        lastCapsChoice = (now, !fromThai)
+        switchIntent = SwitchIntent(at: now, wantThai: !fromThai)
+        capsPress = CapsPress(fromThai: fromThai)
+        Log.write("caps: tap, \(fromThai ? "english" : "thai")")
+        let work = DispatchWorkItem { [weak self] in self?.capsHeld() }
+        capsHoldWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.capsHoldTime, execute: work)
+    }
+
+    /// Caps Lock is still down: it was a hold. Undo the switch and toggle upper case.
+    private func capsHeld() {
+        capsHoldWork = nil
+        guard let p = capsPress, !p.typed else { return }
+        InputSource.select(thai: p.fromThai)
+        lastCapsChoice = (Date(), p.fromThai)
+        switchIntent = nil
+        let on = !CapsKey.lockOn
+        CapsKey.lockOn = on
+        Log.write("caps: held, upper case \(on ? "on" : "off")")
     }
 
     // MARK: Caps Lock: the layout the writer meant
@@ -400,9 +472,20 @@ final class KeyMonitor {
             return passThrough
         }
         if event.getIntegerValueField(.eventSourceUserData) == Self.magicTag { return passThrough }
+        // Caps Lock, remapped to F18: timed here and never passed on.
+        if type == .keyDown || type == .keyUp, CapsKey.isRemapped,
+           Int(event.getIntegerValueField(.keyboardEventKeycode)) == CapsKey.keyCode {
+            capsKey(down: type == .keyDown, event: event)
+            return nil
+        }
+        if type == .keyUp { return passThrough }
+        if type == .keyDown { capsPress?.typed = true }
         // Modifier keys are not typing. Caps Lock is how the writer switches layout: it says which one they meant.
+        // (While remapped, a Caps Lock flag change is LazyBoard's own upper-case toggle, not a switch.)
         if type == .flagsChanged {
-            if isEnabled, Int(event.getIntegerValueField(.keyboardEventKeycode)) == kVK_CapsLock { logCapsEvent(event); noteSwitchIntent() }
+            if isEnabled, !CapsKey.isRemapped, Int(event.getIntegerValueField(.keyboardEventKeycode)) == kVK_CapsLock {
+                logCapsEvent(event); noteSwitchIntent()
+            }
             return passThrough
         }
         // A click on the popup is a choice made in it, not the writer leaving the text.
