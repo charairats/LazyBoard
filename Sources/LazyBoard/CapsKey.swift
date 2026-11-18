@@ -60,8 +60,10 @@ enum CapsKey {
 
     // MARK: Private
 
+    /// Kept for the app's life: services point back at their client, and using one after it is freed aborts.
+    private static let client = IOHIDEventSystemClientCreateSimpleClient(kCFAllocatorDefault)
+
     private static func keyboards() -> [IOHIDServiceClient] {
-        let client = IOHIDEventSystemClientCreateSimpleClient(kCFAllocatorDefault)
         guard let services = IOHIDEventSystemClientCopyServices(client) as? [IOHIDServiceClient] else { return [] }
         return services.filter {
             IOHIDServiceClientConformsTo($0, UInt32(kHIDPage_GenericDesktop), UInt32(kHIDUsage_GD_Keyboard)) != 0
