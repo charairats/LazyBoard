@@ -10,6 +10,12 @@ if CommandLine.arguments.contains("--forget-words") {
     print(WordLog.forget() ? "deleted \(WordLog.url.path)" : "nothing kept")
     exit(0)
 }
+if CommandLine.arguments.contains("--forget-undone") {
+    let n = UserDefaults.standard.stringArray(forKey: Detector.ignoredWordsKey)?.count ?? 0
+    UserDefaults.standard.removeObject(forKey: Detector.ignoredWordsKey)
+    print("forgot \(n) undone words")
+    exit(0)
+}
 if CommandLine.arguments.contains("--caret") {
     Caret.probe()
     exit(0)

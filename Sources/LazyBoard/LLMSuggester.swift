@@ -525,8 +525,10 @@ final class LLMSuggester {
     /// lets through. Nothing is shown. Always through the Claude CLI (the subscription), whatever the backend:
     /// never through the API, which would bill every sent message. Skipped quietly when the CLI is not usable.
     func shadowCheck(_ segment: String, completion: @escaping (Reply) -> Void) {
-        guard cliUsable, !warmShadow.isBusy, backend == .api || Date() >= backoffUntil else {
-            Log.write(cliSignedOut ? "shadow: skipped, cli unavailable" : "shadow: skipped")
+        // Only a measurement for tuning: with the CLI signed out it is simply off, with nothing written per Enter.
+        guard cliUsable else { return }
+        guard !warmShadow.isBusy, backend == .api || Date() >= backoffUntil else {
+            Log.write("shadow: skipped")
             return
         }
         warmShadow.send(Self.userMessage(for: segment), model: Self.shadowModel) { [weak self] reply, error in

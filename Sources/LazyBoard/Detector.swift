@@ -31,8 +31,19 @@ final class Detector {
     static let shared = Detector()
 
     private var spellCache: [String: Bool] = [:]
-    /// Words the user explicitly reverted (Esc after an automatic fix); never flagged again this session.
-    var ignoredWords: Set<String> = []
+    /// Words the user reverted (Esc or Backspace right after an automatic fix): never converted again.
+    /// Kept on disk, so a word undone once stays undone after a relaunch.
+    static let ignoredWordsKey = "ignoredWords"
+    static let ignoredWordsLimit = 2000
+    /// Self-tests run with an empty list, never the writer's.
+    private static let keepsIgnoredWords = !CommandLine.arguments.contains("--test")
+    var ignoredWords: Set<String> = Detector.keepsIgnoredWords
+        ? Set(UserDefaults.standard.stringArray(forKey: Detector.ignoredWordsKey) ?? []) : [] {
+        didSet {
+            guard Self.keepsIgnoredWords, ignoredWords != oldValue else { return }
+            UserDefaults.standard.set(Array(ignoredWords.prefix(Self.ignoredWordsLimit)), forKey: Self.ignoredWordsKey)
+        }
+    }
     private let trimSet = CharacterSet(charactersIn: "\"'(),.?!;:[]{}")
 
     /// Very common short Thai words; lets 1–3 key words like "muj" (ที่) trigger confidently.
@@ -300,6 +311,8 @@ final class Detector {
         if w.range(of: "^[IVXLCDM]+$", options: .regularExpression) != nil { return true }
         if w.range(of: "^[ivxlcdm]+$", options: .regularExpression) != nil { return Self.romanLetterWords.contains(w) }
         // ALL CAPS is spelled like the lowercase word (HELLO); the spell checker would pass any capitals.
+        // A token with no letters (--, '') would pass this test unchanged and recurse forever: it is not a word.
+        if !w.contains(where: \.isLetter) { return false }
         if w.count >= 2, w.allSatisfy({ !$0.isLetter || $0.isUppercase }) { return isEnglishWord(w.lowercased()) }
         // The spell checker passes vowel-less strings as abbreviations (dvdd, dd-dv), so กอกก would become dvdd.
         let parts = w.lowercased().split(separator: "-").map(String.init)
