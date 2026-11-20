@@ -34,7 +34,17 @@ final class KeyMonitor {
     var switchLayoutAfterFix = true
     /// Apply a confident wrong-layout fix by itself when a word ends (space) or the line is sent (Enter),
     /// however short the word: this is what lets the user type on one layout and never switch.
-    var autoFixLayout = true
+    var autoFixLayout = false { didSet { updateCaretLaziness() } }
+    /// Switching language with Caps Lock also converts the words just typed on the wrong layout. This is the
+    /// main way a fix happens: the writer asks for it with the key they were about to press anyway.
+    var fixOnSwitch = true
+    /// Show the small "⇥ fix" popup while typing. Off by default: a popup on every doubtful word is noise,
+    /// and while it is off Tab is never taken from the app.
+    var showHint = false { didSet { if !showHint, suggestion?.source == .layout { panel.hide() }; updateCaretLaziness() } }
+
+    /// Other apps are asked to build their accessibility tree only when LazyBoard may write or show something
+    /// by itself; otherwise only at the moment a popup is really shown.
+    private func updateCaretLaziness() { Caret.lazy = !(autoFixLayout || showHint || checkWhileTyping) }
 
     /// The last automatic fix, so Esc can put the original keystrokes back.
     private struct AutoFix {
@@ -54,7 +64,7 @@ final class KeyMonitor {
     /// on, Enter checks first (only when a word looks off) and Ctrl+Enter sends as typed.
     var enterChecks = false
     /// Also ask Claude quietly whenever typing pauses (off: the whole sentence is checked only at Enter).
-    var checkWhileTyping = false
+    var checkWhileTyping = false { didSet { updateCaretLaziness() } }
     /// A word that looks off (mixed scripts, ภาาษา) just ended: the next space sends the line to the fast model quietly.
     private var quietCheckDue = false
     /// The segment of the quiet check in flight: no loading dots for it.
@@ -225,16 +235,6 @@ final class KeyMonitor {
         }
     }
 
-    /// Sent unchecked: ask Claude anyway, after the fact, to count what the local check lets through.
-    private func shadowCheck(_ segment: String) {
-        llm.shadowCheck(segment) { reply in
-            let pairs = WordLog.changedPairs(from: segment, to: reply.fixed)
-            guard !pairs.isEmpty else { Log.write("shadow: claude agrees"); return }
-            Log.write("shadow: claude would change \(pairs.count) (\(WordLog.shapes(pairs)))")
-            for p in pairs { WordLog.write(.missed, why: WordLog.shape(p), from: p.from, to: p.to) }
-        }
-    }
-
     /// End the hold: optionally deliver the Enter that was held back.
     private func releaseHold(send: Bool, showCheck: Bool = false) {
         guard let h = hold else { return }
@@ -299,7 +299,7 @@ final class KeyMonitor {
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             self?.frontBundleID = app?.bundleIdentifier
             self?.reset()
-            if let app = app { Caret.prepare(app) }
+            if let app = app, !Caret.lazy { Caret.prepare(app) }
         }
         return true
     }
@@ -328,6 +328,8 @@ final class KeyMonitor {
         var fromThai: Bool
         /// Another key went down while Caps Lock was held: a quick switch rolled into typing, not a hold.
         var typed = false
+        /// This press also converted the words before it.
+        var fixed = false
     }
     private var capsPress: CapsPress?
     private var capsHoldWork: DispatchWorkItem?
@@ -363,15 +365,15 @@ final class KeyMonitor {
         } else {
             fromThai = InputSource.currentIsThai()
         }
+        // The words just typed came out on the layout being left: switching is the writer asking for them on the
+        // other one. Only what the detector is sure of (a real word written over one that is not) is converted.
+        let fixed = fixOnSwitch && fixForSwitch(toThai: !fromThai)
         // Switch on key down, not key up: the next letter is often pressed before Caps Lock is let go.
         InputSource.select(thai: !fromThai)
         lastCapsChoice = (now, !fromThai)
-        switchIntent = SwitchIntent(at: now, wantThai: !fromThai)
-        capsPress = CapsPress(fromThai: fromThai)
-        Log.write("caps: tap, \(fromThai ? "english" : "thai")")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            Log.write("caps: 50ms later the layout is \(InputSource.currentIsThai() ? "thai" : "english")")
-        }
+        switchIntent = fixed ? nil : SwitchIntent(at: now, wantThai: !fromThai)
+        capsPress = CapsPress(fromThai: fromThai, fixed: fixed)
+        Log.write("caps: tap, \(fromThai ? "english" : "thai")\(fixed ? ", fixed the last words" : "")")
         let work = DispatchWorkItem { [weak self] in self?.capsHeld() }
         capsHoldWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.capsHoldTime, execute: work)
@@ -381,12 +383,25 @@ final class KeyMonitor {
     private func capsHeld() {
         capsHoldWork = nil
         guard let p = capsPress, !p.typed else { return }
+        // A hold asks for upper case, not for the other language: take back the fix this press made.
+        if p.fixed, let auto = lastAuto, buffer == auto.bufferAfter { undoAutoFix(auto, remember: false) }
         InputSource.select(thai: p.fromThai)
         lastCapsChoice = (Date(), p.fromThai)
         switchIntent = nil
         let on = !CapsKey.lockOn
         CapsKey.lockOn = on
         Log.write("caps: held, upper case \(on ? "on" : "off")")
+    }
+
+    /// Convert the wrong-layout words that end the buffer, if they are for the layout being switched to.
+    private func fixForSwitch(toThai: Bool) -> Bool {
+        guard isEnabled, hold == nil, cycle == nil, let s = suggestion, s.source == .layout, let d = s.direction,
+              (d == .englishToThai) == toThai else { return false }
+        if let id = frontBundleID, excludedBundleIDs.contains(id) { return false }
+        guard !Caret.keysAreNotTyping() else { return false }
+        Log.write("layout fix on switch (\(s.scalarCount) keys)")
+        apply(s, automatic: true)
+        return true
     }
 
     // MARK: Caps Lock: the layout the writer meant
@@ -487,7 +502,10 @@ final class KeyMonitor {
         // (While remapped, a Caps Lock flag change is LazyBoard's own upper-case toggle, not a switch.)
         if type == .flagsChanged {
             if isEnabled, !CapsKey.isRemapped, Int(event.getIntegerValueField(.keyboardEventKeycode)) == kVK_CapsLock {
-                logCapsEvent(event); noteSwitchIntent()
+                // One press reaches the tap as two events a few ms apart: count it once.
+                let gap = Date().timeIntervalSince(lastCapsEvent)
+                logCapsEvent(event)
+                if gap >= 0.3 { noteSwitchIntent() }
             }
             return passThrough
         }
@@ -569,7 +587,9 @@ final class KeyMonitor {
 
         switch keyCode {
         case kVK_Tab:
-            if let s = suggestion, !flags.contains(.maskShift) {
+            // Tab belongs to the app. It is taken only for a fix that is on screen: Claude's, or the layout hint
+            // when hints are switched on.
+            if let s = suggestion, !flags.contains(.maskShift), s.source == .llm || (showHint && panel.isVisible) {
                 accept(s)
                 return nil // swallow the Tab
             }
@@ -629,10 +649,6 @@ final class KeyMonitor {
                     let showing = suggestion?.source == .llm ? ", fix was showing" : ""
                     if hold == nil, suggestion?.source == .llm { noteQuietIgnored() }
                     Log.write("enter sent: plain (\(segment.unicodeScalars.count) keys\(showing))")
-                    if llm.isEnabled, !llm.rewrites, !llm.isChecked(segment) {
-                        // Off the key path: the check runs after the Enter is already on its way.
-                        DispatchQueue.main.async { [weak self] in self?.shadowCheck(segment) }
-                    }
                 }
                 if fixedFirst {
                     // Deliver the Enter after the replacement, in order.
@@ -673,7 +689,6 @@ final class KeyMonitor {
                     } else if doubts.isEmpty {
                         // Every word is real: send at once, with no dots and no check mark.
                         Log.write("enter sent: looks fine (\(segment.unicodeScalars.count) keys)")
-                        shadowCheck(segment)
                     } else {
                         var counts: [String: Int] = [:]
                         for d in doubts { counts[d.why.rawValue, default: 0] += 1 }
@@ -704,11 +719,9 @@ final class KeyMonitor {
             if !holdOnEnter { Log.write("enter sent: hold off") }
             else if !llm.isReady { Log.write("enter sent: llm not ready") }
             else if !review && !plainEnter {
-                // Plain Enter: out it goes. Opus reads it afterwards, to count how often Ctrl+Enter would have helped.
                 let segment = LLMSuggester.segment(of: buffer)
                 if segment.unicodeScalars.count >= Self.holdMinimumKeys {
-                    Log.write("enter sent: plain (\(segment.unicodeScalars.count) keys, \(LLMSuggester.doubts(in: segment).count) doubted)")
-                    shadowCheck(segment)
+                    Log.write("enter sent: plain (\(segment.unicodeScalars.count) keys)")
                 }
             }
             if fixedFirst {
@@ -755,7 +768,6 @@ final class KeyMonitor {
             let eventText = String(utf16CodeUnits: chars, count: length)
             let typed = InputSource.resolved(eventText: eventText,
                                              layoutText: InputSource.characters(keyCode: keyCode, flags: flags))
-            if typed != eventText { Log.write("key: event and layout disagree, using layout") }
             trackSwitchIntent(typed)
             for sc in typed.unicodeScalars where sc.value < 0x20 || (0xF700...0xF8FF).contains(sc.value) {
                 reset()
@@ -822,7 +834,7 @@ final class KeyMonitor {
     /// Space after a word that looks off (mixed scripts, unknown Thai such as ภาาษา): remember it, and on the
     /// next space (one more word of context) ask the fast model quietly. Its fix waits for Tab; Enter will not send over it.
     private func quietCheckOnSpace() {
-        guard llm.isReady, !llm.rewrites, suggestion == nil, cycle == nil, hold == nil, Date() >= quietMutedUntil else { return }
+        guard checkWhileTyping, llm.isReady, !llm.rewrites, suggestion == nil, cycle == nil, hold == nil, Date() >= quietMutedUntil else { return }
         if quietCheckDue {
             quietCheckDue = false
             if let segment = llm.checkQuiet(syncedBuffer(log: false)) {
@@ -884,14 +896,16 @@ final class KeyMonitor {
     }
 
     /// Esc shortly after an automatic fix: put the original keystrokes back and stop flagging those words.
-    private func undoAutoFix(_ auto: AutoFix) {
+    private func undoAutoFix(_ auto: AutoFix, remember: Bool = true) {
         let source = CGEventSource(stateID: .combinedSessionState)
         for _ in 0..<auto.replacementScalars { postKey(kVK_Delete, source) }
         postText(auto.original, source)
         var scalars = Array(buffer.unicodeScalars)
         scalars.removeLast(min(auto.replacementScalars, scalars.count))
         buffer = String(String.UnicodeScalarView(scalars)) + auto.original
-        detector.ignoredWords.formUnion(auto.original.split(whereSeparator: { $0 == " " || $0 == "\n" }).map(String.init))
+        if remember {
+            detector.ignoredWords.formUnion(auto.original.split(whereSeparator: { $0 == " " || $0 == "\n" }).map(String.init))
+        }
         lastAuto = nil
         suggestion = nil
         panel.hide()
@@ -937,6 +951,12 @@ final class KeyMonitor {
         }
         // The pause timer waits; a check already on its way keeps going (an auto fix re-checks the line).
         llm.cancelPending()
+        guard showHint else {
+            // Kept ready for the language switch (or the automatic fix), with nothing on screen.
+            if suggestion?.source == .llm { llmBase = nil; panel.hide() }
+            suggestion = next
+            return
+        }
         guard next != suggestion || !panel.isVisible else { return }
         suggestion = next
         if let s = next {
@@ -950,7 +970,7 @@ final class KeyMonitor {
         // (ignoring trailing spaces), or the result is stale.
         guard cycle == nil else { return }
         if original == quietSegment { quietSegment = nil }
-        if suggestion?.source == .layout, hold?.segment != original {
+        if suggestion?.source == .layout, showHint, hold?.segment != original {
             Log.write("llm result held back: layout fix showing")
             return
         }

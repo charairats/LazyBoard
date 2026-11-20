@@ -4,6 +4,10 @@ import ApplicationServices
 /// Finds where to put the popup: text caret (via Accessibility), else the focused text field,
 /// else focused window, else mouse.
 enum Caret {
+    /// While true, an app is asked to build its accessibility tree (which can slow Chrome and Electron apps)
+    /// only when a popup is about to be shown there, never just because it came to the front or a key was typed.
+    static var lazy = true
+
     static func anchorPoint() -> NSPoint {
         guard let app = NSWorkspace.shared.frontmostApplication else { return NSEvent.mouseLocation }
         let (point, source) = locate(in: app)
@@ -46,7 +50,7 @@ enum Caret {
     private static func keysAreNotTyping(in app: NSRunningApplication) -> Bool {
         if let url = app.bundleURL, let category = Bundle(url: url)?.infoDictionary?["LSApplicationCategoryType"] as? String,
            category.contains("games") { return true }
-        guard let element = focusedElement(in: app), axValue(element, kAXRoleAttribute) as? String == "AXWebArea" else { return false }
+        guard let element = focusedElement(in: app, wake: !lazy), axValue(element, kAXRoleAttribute) as? String == "AXWebArea" else { return false }
         // The page itself holds focus (a canvas game, say); a designMode document is still editable.
         return axValue(element, "AXEditableAncestor") == nil
     }
@@ -82,9 +86,10 @@ enum Caret {
         return focusedElement(in: app)
     }
 
-    private static func focusedElement(in app: NSRunningApplication) -> AXUIElement? {
+    private static func focusedElement(in app: NSRunningApplication, wake: Bool = true) -> AXUIElement? {
         let element = focusedElementOnce(in: app)
         if let e = element, isText(e) { return e }
+        guard wake else { return element }
         // Electron/Chromium apps expose nothing, or only a container such as AXSplitGroup, until a client asks.
         guard !enabledPIDs.contains(app.processIdentifier) else { return element }
         enabledPIDs.insert(app.processIdentifier)

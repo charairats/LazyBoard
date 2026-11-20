@@ -10,19 +10,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     // Menu items. Titles are set in buildStatusItem / refreshMenuState.
     private let statusLine = NSMenuItem(title: "Starting…", action: nil, keyEquivalent: "")
     private let claudeLine = NSMenuItem(title: "", action: #selector(fixClaude), keyEquivalent: "")
-    /// Grey note: the after-send check (CLI only) is off, while the checks in use (API) work.
-    private let shadowLine = NSMenuItem(title: "After-send check: off (CLI signed out)", action: nil, keyEquivalent: "")
     private var probeTimer: Timer?
     private let enabledItem = NSMenuItem(title: "Enabled", action: #selector(toggleEnabled), keyEquivalent: "")
     private let excludeItem = NSMenuItem(title: "Disable in This App", action: #selector(toggleExclude), keyEquivalent: "")
-    private let autoFixItem = NSMenuItem(title: "Auto-Fix on Space / Enter  (Esc to undo)", action: #selector(toggleAutoFix), keyEquivalent: "")
-    private let switchItem = NSMenuItem(title: "Switch Input Source After Fix", action: #selector(toggleSwitch), keyEquivalent: "")
-    private let capsItem = NSMenuItem(title: "Caps Lock Switches Language (hold for CAPS)", action: #selector(toggleCaps), keyEquivalent: "")
+    private let capsItem = NSMenuItem(title: "Caps Lock Switches Language  (hold for CAPS)", action: #selector(toggleCaps), keyEquivalent: "")
+    private let fixOnSwitchItem = NSMenuItem(title: "Also Fix the Words I Just Typed", action: #selector(toggleFixOnSwitch), keyEquivalent: "")
+    private let autoFixItem = NSMenuItem(title: "Fix Automatically While Typing  (Backspace to undo)", action: #selector(toggleAutoFix), keyEquivalent: "")
+    private let hintItem = NSMenuItem(title: "Show Hint Popup  (Tab to fix)", action: #selector(toggleHint), keyEquivalent: "")
     private var signalSources: [DispatchSourceSignal] = []
     private let llmItem = NSMenuItem(title: "Use Claude", action: #selector(toggleLLM), keyEquivalent: "")
     private let sendCheckItem = NSMenuItem(title: "Check Before Send", action: nil, keyEquivalent: "")
     private let sendCheckMenu = NSMenu()
-    private let quietItem = NSMenuItem(title: "Also Check When I Pause Typing", action: #selector(toggleQuiet), keyEquivalent: "")
+    private let quietItem = NSMenuItem(title: "Also Suggest While I Type", action: #selector(toggleQuiet), keyEquivalent: "")
     private let rewriteItem = NSMenuItem(title: "Polish on Send", action: nil, keyEquivalent: "")
     private let rewriteMenu = NSMenu()
     private let emojiItem = NSMenuItem(title: "Add 1–2 Emoji at the End", action: #selector(toggleEmoji), keyEquivalent: "")
@@ -60,14 +59,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         migrateOldSettings()
         WordLog.purge()
         defaults.register(defaults: ["enabled": true, "switchLayout": true, "excluded": [String](),
-                                     "autoFix": true, "capsSwitch": true, "holdOnEnter": true, "enterChecks": false, "checkWhileTyping": false, "emojiMode": false,
+                                     "autoFix": false, "fixOnSwitch": true, "showHint": false, "capsSwitch": true, "holdOnEnter": true, "enterChecks": false, "checkWhileTyping": false, "emojiMode": false,
                                      "llmEnabled": true, "llmModel": LLMSuggester.Model.haiku.rawValue,
                                      "strongModel": LLMSuggester.Model.sonnet.rawValue,
                                      "llmBackend": LLMSuggester.Backend.claudeCLI.rawValue])
         monitor.llm.backend = LLMSuggester.Backend(rawValue: defaults.string(forKey: "llmBackend") ?? "") ?? .claudeCLI
         monitor.isEnabled = defaults.bool(forKey: "enabled")
-        monitor.switchLayoutAfterFix = defaults.bool(forKey: "switchLayout")
+        // After a fix the keyboard always follows the text; the old menu switch for this is gone.
+        monitor.switchLayoutAfterFix = true
         monitor.autoFixLayout = defaults.bool(forKey: "autoFix")
+        monitor.fixOnSwitch = defaults.bool(forKey: "fixOnSwitch")
+        monitor.showHint = defaults.bool(forKey: "showHint")
         monitor.capsSwitch = defaults.bool(forKey: "capsSwitch")
         // pkill and logout send SIGTERM: quit properly so Caps Lock goes back to normal.
         for sig in [SIGTERM, SIGINT, SIGHUP] {
@@ -86,7 +88,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         monitor.llm.isEnabled = defaults.bool(forKey: "llmEnabled")
         monitor.llm.model = LLMSuggester.Model(rawValue: defaults.string(forKey: "llmModel") ?? "") ?? .haiku
         monitor.llm.strongModel = LLMSuggester.Model(rawValue: defaults.string(forKey: "strongModel") ?? "") ?? .sonnet
-        monitor.llm.apiKey = KeychainStore.read()
+        // The keychain is opened only when the key is needed: it can ask for a password after every new build.
+        if monitor.llm.isEnabled, monitor.llm.backend == .api { monitor.llm.apiKey = KeychainStore.read() }
         Log.write("llm: backend \(monitor.llm.backend.rawValue), enabled \(monitor.llm.isEnabled), api key \(monitor.llm.apiKey == nil ? "none" : "saved"), claude cli \(LLMSuggester.claudePath == nil ? "missing" : "found")")
         monitor.onFix = { [weak self] s in
             guard let self = self else { return }
@@ -137,21 +140,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         menu.addItem(statusLine)
         claudeLine.target = self
         menu.addItem(claudeLine)
-        shadowLine.toolTip = "The after-send check uses the Claude CLI. Run claude in Terminal, type /login; LazyBoard notices within a minute."
-        menu.addItem(shadowLine)
         menu.addItem(.separator())
 
         // 2. On/off.
         add([enabledItem, excludeItem], to: menu)
         menu.addItem(.separator())
 
-        // 3. Wrong-layout fixes (works offline, no Claude).
-        menu.addItem(Self.header("Wrong Keyboard Fixes (offline)"))
-        add([autoFixItem, switchItem, capsItem], to: menu)
+        // 3. Wrong-layout fixes (works offline, no Claude). Quiet by default: a fix happens when the writer
+        // switches language; writing by itself and popups are extras to switch on.
+        menu.addItem(Self.header("Wrong Keyboard"))
+        fixOnSwitchItem.indentationLevel = 1
+        fixOnSwitchItem.toolTip = "Typed on the wrong keyboard? Press Caps Lock: the language switches and the words you just typed are converted. Backspace right after puts them back."
+        autoFixItem.toolTip = "Converts wrong-keyboard words by itself at Space or Enter, only when the result is a real word. Backspace or Esc right after puts them back."
+        hintItem.toolTip = "Shows a small popup with the fix while you type. Tab applies it."
+        add([capsItem, fixOnSwitchItem, autoFixItem, hintItem], to: menu)
         menu.addItem(.separator())
 
         // 4. Claude: master switch first, then what it does.
-        menu.addItem(Self.header("Claude Spell Check"))
+        menu.addItem(Self.header("Claude Spell Check  (only when asked)"))
         for mode in SendCheck.allCases {
             let item = NSMenuItem(title: mode.title, action: #selector(selectSendCheck(_:)), keyEquivalent: "")
             item.target = self
@@ -253,10 +259,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     /// Greys out what cannot work right now, instead of hiding it.
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         if item === claudeLine { return claudeProblem != nil }
-        if item === shadowLine { return false }
         let needsClaude = item === quietItem || item.menu === sendCheckMenu || item.menu === rewriteMenu
         if needsClaude { return monitor.isEnabled && monitor.llm.isEnabled }
-        if item === autoFixItem || item === switchItem || item === capsItem || item === llmItem || item === excludeItem { return monitor.isEnabled }
+        if item === fixOnSwitchItem { return monitor.isEnabled && monitor.capsSwitch }
+        if item === autoFixItem || item === hintItem || item === capsItem || item === llmItem || item === excludeItem { return monitor.isEnabled }
         return true
     }
 
@@ -311,8 +317,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     private func refreshMenuState() {
         let llm = monitor.llm
         enabledItem.state = monitor.isEnabled ? .on : .off
-        switchItem.state = monitor.switchLayoutAfterFix ? .on : .off
+        fixOnSwitchItem.state = monitor.fixOnSwitch && monitor.capsSwitch ? .on : .off
         autoFixItem.state = monitor.autoFixLayout ? .on : .off
+        hintItem.state = monitor.showHint ? .on : .off
         capsItem.state = monitor.capsSwitch ? .on : .off
         quietItem.state = monitor.checkWhileTyping ? .on : .off
         llmItem.state = llm.isEnabled ? .on : .off
@@ -400,7 +407,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             statusLine.title = "LazyBoard: On" + (fixCount == 0 ? "" : " · \(fixCount) fixes")
         }
         let llm = monitor.llm
-        shadowLine.isHidden = !(llm.isEnabled && llm.backend == .api && llm.cliSignedOut && LLMSuggester.claudePath != nil)
         if let problem = claudeProblem {
             // Keep the menu narrow: a short line here, the full text on click and in the tooltip.
             var short = problem.components(separatedBy: CharacterSet(charactersIn: ":(\n")).first?
@@ -422,7 +428,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     /// Clicked the Claude problem line: say what is wrong in full and offer the fix.
     @objc private func fixClaude() {
         guard let problem = claudeProblem else { return }
-        if monitor.llm.backend == .api && monitor.llm.apiKey == nil { editAPIKey(); return }
+        if monitor.llm.backend == .api && monitor.llm.apiKey == nil {
+            // A key may be saved but was not read (keychain prompt dismissed): look once more before asking for it.
+            loadAPIKeyIfNeeded()
+            if monitor.llm.apiKey == nil { editAPIKey() } else { refreshMenuState() }
+            return
+        }
         if monitor.llm.cliSignedOut {
             // Look first: if the CLI is signed in by now, there is nothing to ask.
             monitor.llm.probeCLI { [weak self] ok in
@@ -461,10 +472,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         refreshMenuState()
     }
 
-    @objc private func toggleSwitch() {
-        monitor.switchLayoutAfterFix.toggle()
-        defaults.set(monitor.switchLayoutAfterFix, forKey: "switchLayout")
+    @objc private func toggleFixOnSwitch() {
+        monitor.fixOnSwitch.toggle()
+        defaults.set(monitor.fixOnSwitch, forKey: "fixOnSwitch")
         refreshMenuState()
+    }
+
+    @objc private func toggleHint() {
+        monitor.showHint.toggle()
+        defaults.set(monitor.showHint, forKey: "showHint")
+        refreshMenuState()
+    }
+
+    /// Read the saved API key the first time Claude is switched on with the API backend.
+    private func loadAPIKeyIfNeeded() {
+        guard monitor.llm.isEnabled, monitor.llm.backend == .api, monitor.llm.apiKey == nil else { return }
+        monitor.llm.apiKey = KeychainStore.read()
     }
 
     @objc private func toggleCaps() {
@@ -531,6 +554,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     @objc private func toggleLLM() {
         monitor.llm.isEnabled.toggle()
         defaults.set(monitor.llm.isEnabled, forKey: "llmEnabled")
+        loadAPIKeyIfNeeded()
         refreshMenuState()
     }
 
@@ -540,6 +564,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         defaults.set(raw, forKey: "llmBackend")
         monitor.llm.lastError = nil
         Log.write("llm: backend \(raw)")
+        loadAPIKeyIfNeeded()
         refreshMenuState()
         if backend == .api && monitor.llm.apiKey == nil { editAPIKey() }
     }

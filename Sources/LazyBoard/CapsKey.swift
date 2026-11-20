@@ -30,6 +30,7 @@ enum CapsKey {
         }
         isRemapped = count > 0
         Log.write("caps: remapped to F18 on \(count) keyboard(s)")
+        if isRemapped { startWatchdog() }
         return isRemapped
     }
 
@@ -42,7 +43,38 @@ enum CapsKey {
             _ = IOHIDServiceClientSetProperty(service, mappingKey, map.filter { !isCaps($0) } as CFArray)
         }
         isRemapped = false
+        stopWatchdog()
         Log.write("caps: normal Caps Lock restored")
+    }
+
+    // MARK: Watchdog
+
+    /// If LazyBoard dies without quitting (a crash, a force quit), nobody is left to handle F18 and Caps Lock
+    /// would do nothing until the next launch. A tiny shell process outlives the app and, the moment the app
+    /// is gone, takes the remap off again. A normal quit stops it first.
+    private static var watchdog: Process?
+
+    private static func startWatchdog() {
+        guard watchdog == nil else { return }
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", "while kill -0 \(pid) 2>/dev/null; do sleep 1; done; "
+            + "/usr/bin/hidutil property --set '{\"UserKeyMapping\":[]}' >/dev/null 2>&1"]
+        p.standardInput = FileHandle.nullDevice
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        do {
+            try p.run()
+            watchdog = p
+        } catch {
+            Log.write("caps: watchdog did not start (\(error.localizedDescription))")
+        }
+    }
+
+    private static func stopWatchdog() {
+        if let p = watchdog, p.isRunning { p.terminate() }
+        watchdog = nil
     }
 
     /// The real Caps Lock (upper case) state.
